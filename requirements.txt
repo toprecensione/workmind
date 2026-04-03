@@ -1,0 +1,17 @@
+# WorkMind Python Dependencies
+# CONFIDENTIAL - PRIVATE REPOSITORY
+
+# Process & resource monitoring
+psutil>=5.9.0
+
+# HTTP (for future API endpoints / health checks)
+httpx>=0.27.0
+
+# Scheduling (if extended)
+apscheduler>=3.10.0
+
+# Type checking helpers
+typing_extensions>=4.10.0
+
+# Cryptography (for future secret management)
+cryptography>=42.0.0

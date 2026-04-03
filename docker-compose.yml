@@ -1,0 +1,52 @@
+version: "3.9"
+
+# WorkMind Docker Compose — CONFIDENTIAL
+# For local testing of multi-node deployment.
+# DO NOT expose ports publicly.
+
+x-workmind-common: &workmind-common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  restart: unless-stopped
+  env_file: .env
+  volumes:
+    - ./data:/app/data
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "50m"
+      max-file: "5"
+
+services:
+  workmind-node-1:
+    <<: *workmind-common
+    container_name: workmind-node-1
+    environment:
+      WORKMIND_NODE_ID: "node-1"
+      WORKMIND_NODE_LABEL: "Primary Worker"
+    volumes:
+      - workmind_logs_1:/app/logs
+      - workmind_reports_1:/app/reports
+      - workmind_backups_1:/app/backups
+      - ./data:/app/data:ro
+
+  workmind-node-2:
+    <<: *workmind-common
+    container_name: workmind-node-2
+    environment:
+      WORKMIND_NODE_ID: "node-2"
+      WORKMIND_NODE_LABEL: "Secondary Worker"
+    volumes:
+      - workmind_logs_2:/app/logs
+      - workmind_reports_2:/app/reports
+      - workmind_backups_2:/app/backups
+      - ./data:/app/data:ro
+
+volumes:
+  workmind_logs_1:
+  workmind_reports_1:
+  workmind_backups_1:
+  workmind_logs_2:
+  workmind_reports_2:
+  workmind_backups_2:
