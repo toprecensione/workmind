@@ -93,6 +93,15 @@ class NodeConfig:
     environment: str = os.getenv("WORKMIND_ENV", "production")
 
 
+# ─── AI Providers ────────────────────────────────────────────────────────────
+@dataclass
+class AIConfig:
+    deepseek_daily_limit_usd: float = float(os.getenv("WORKMIND_DEEPSEEK_DAILY_LIMIT", "5.0"))
+    claude_daily_limit_usd: float = float(os.getenv("WORKMIND_CLAUDE_DAILY_LIMIT", "10.0"))
+    default_timeout_seconds: int = 60
+    max_retries: int = 3
+
+
 # ─── Composite Config ─────────────────────────────────────────────────────────
 @dataclass
 class AppConfig:
@@ -101,6 +110,7 @@ class AppConfig:
     mindwork: MindWorkConfig = field(default_factory=MindWorkConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)
     update: UpdateConfig = field(default_factory=UpdateConfig)
+    ai: AIConfig = field(default_factory=AIConfig)
 
 
 # Singleton

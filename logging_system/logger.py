@@ -23,13 +23,14 @@ from config.settings import config
 # ─── Status / Action Enums ────────────────────────────────────────────────────
 
 class LogStatus(str, Enum):
-    OK      = "ok"
-    WARNING = "warning"
-    ERROR   = "error"
-    STARTED = "started"
-    STOPPED = "stopped"
-    SKIPPED = "skipped"
-    PENDING = "pending"
+    OK       = "ok"
+    WARNING  = "warning"
+    ERROR    = "error"
+    STARTED  = "started"
+    STOPPING = "stopping"
+    STOPPED  = "stopped"
+    SKIPPED  = "skipped"
+    PENDING  = "pending"
 
 
 class LogAction(str, Enum):
@@ -48,6 +49,12 @@ class LogAction(str, Enum):
     CONFIG      = "config"
     STARTUP     = "startup"
     SHUTDOWN    = "shutdown"
+    CLASSIFY    = "classify"
+    EXTRACT     = "extract"
+    SUMMARIZE   = "summarize"
+    TEACH       = "teach"
+    FEEDBACK    = "feedback"
+    ENCRYPT     = "encrypt"
 
 
 # ─── JSON Formatter ───────────────────────────────────────────────────────────

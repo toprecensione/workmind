@@ -1,17 +1,43 @@
 # WorkMind Python Dependencies
 # CONFIDENTIAL - PRIVATE REPOSITORY
 
-# Process & resource monitoring
-psutil>=5.9.0
+# ── Core ──────────────────────────────────────────────────────────────────────
+psutil>=5.9.0                    # Process & resource monitoring
+httpx>=0.27.0                    # HTTP client (AI APIs, Graph API)
+apscheduler>=3.10.0              # Scheduling (report, scan cycles)
+typing_extensions>=4.10.0        # Type checking helpers
+cryptography>=42.0.0             # Encryption at-rest (Fernet/PBKDF2)
+pyyaml>=6.0                      # Company config (company.yaml)
 
-# HTTP (for future API endpoints / health checks)
-httpx>=0.27.0
+# ── AI Providers ──────────────────────────────────────────────────────────────
+# DeepSeek: usa httpx diretto (API OpenAI-compatibile)
+# Claude: usa httpx diretto (Anthropic Messages API)
 
-# Scheduling (if extended)
-apscheduler>=3.10.0
+# ── Storage ───────────────────────────────────────────────────────────────────
+redis>=5.0.0                     # Cache e pattern history (opzionale, fallback in-memory)
 
-# Type checking helpers
-typing_extensions>=4.10.0
+# ── Document Parsing ──────────────────────────────────────────────────────────
+pdfplumber>=0.10.0               # PDF text + table extraction
+python-docx>=1.1.0               # DOCX parsing
+openpyxl>=3.1.0                  # Excel XLSX parsing
+chardet>=5.2.0                   # Encoding detection per CSV/TXT
+extract-msg>=0.48.0              # Outlook MSG parsing
+ezdxf>=1.1.0                     # AutoCAD DXF parsing
 
-# Cryptography (for future secret management)
-cryptography>=42.0.0
+# ── Database ──────────────────────────────────────────────────────────────────
+sqlalchemy>=2.0.0                # ORM / schema discovery
+pyodbc>=5.1.0                    # SQL Server ODBC driver
+pymysql>=1.1.0                   # MySQL connector
+# psycopg2-binary>=2.9.0         # PostgreSQL (decommentare se necessario)
+
+# ── Email ─────────────────────────────────────────────────────────────────────
+# Office 365: usa httpx + Microsoft Graph API
+# Exchange on-premise:
+# exchangelib>=5.0.0             # Decommentare se serve Exchange EWS
+
+# ── File Watcher ──────────────────────────────────────────────────────────────
+watchdog>=4.0.0                  # Real-time filesystem monitoring (inotify)
+
+# ── Interface ─────────────────────────────────────────────────────────────────
+gradio>=4.0.0                    # Chat interface supervisore (porta 7860)
+flask>=3.0.0                     # Dashboard HTML multi-bot (porta 7861)
