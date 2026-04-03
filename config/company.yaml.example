@@ -1,0 +1,115 @@
+# =============================================================================
+# WorkMind — Configurazione Azienda Cliente
+# CONFIDENTIAL - PRIVATE REPOSITORY - NOT FOR PUBLIC DISTRIBUTION
+#
+# Copia questo file come config/company.yaml e personalizzalo.
+# Le PASSWORD vanno nel file .env, MAI qui.
+# =============================================================================
+
+# ── Identità azienda ──────────────────────────────────────────────────────────
+name: "Rossi Metalli Srl"
+sector: "manifatturiero"       # manifatturiero | commercio | servizi | edilizia | altro
+language: "it"
+timezone: "Europe/Rome"
+supervisor_email: "mario.rossi@rossimetalli.it"
+
+# ── Report automatici ─────────────────────────────────────────────────────────
+report_time_daily: "22:00"       # orario report giornaliero (HH:MM)
+report_day_weekly: "friday"      # giorno report settimanale
+
+# ── Cartelle locali aggiuntive da monitorare ──────────────────────────────────
+local_watch_dirs:
+  - "/mnt/share1/documenti"
+  - "/mnt/share1/ordini"
+
+# ── Database gestionale ───────────────────────────────────────────────────────
+database:
+  enabled: true
+  type: "sqlserver"              # sqlserver | mysql | postgres
+  host: "192.168.1.10"
+  port: 1433
+  name: "GestionaleDB"
+  user: "workmind_reader"        # utente read-only dedicato
+  # password: env WORKMIND_DB_PASSWORD
+  schema_discovery: true
+  max_rows_per_query: 5000
+  tables_include: []             # se vuoto: legge tutte le tabelle
+  tables_exclude:
+    - "sys_log"
+    - "audit_trail"
+
+# ── Email Outlook / Office 365 ────────────────────────────────────────────────
+email:
+  enabled: true
+  provider: "office365"          # office365 | exchange_onprem | imap
+  tenant_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  client_id: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+  # client_secret: env WORKMIND_EMAIL_SECRET
+  mailbox: "info@rossimetalli.it"
+  fetch_interval_minutes: 5
+  max_emails_per_fetch: 50
+  folders_monitor:
+    - "INBOX"
+    - "Ordini Clienti"
+
+  # Per Exchange on-premise (se provider = exchange_onprem):
+  # exchange_url: "https://mail.azienda.it/EWS/Exchange.asmx"
+
+  # Per IMAP (se provider = imap):
+  # imap_host: "mail.azienda.it"
+  # imap_port: 993
+  # imap_user: "info@rossimetalli.it"
+  # password: env WORKMIND_IMAP_PASSWORD
+
+# ── Cartelle condivise SMB ────────────────────────────────────────────────────
+smb:
+  enabled: true
+  recursive_watch: true
+  extensions_monitor:
+    - ".pdf"
+    - ".docx"
+    - ".xlsx"
+    - ".csv"
+    - ".dxf"
+    - ".dwg"
+  shares:
+    - server: "\\\\192.168.1.5\\Documenti"
+      mount_point: "/mnt/share1"
+      username: "workmind"
+      domain: "ROSSIMETALLI"
+      # password: env WORKMIND_SMB_PASSWORD
+    - server: "\\\\192.168.1.5\\Ordini"
+      mount_point: "/mnt/share2"
+      username: "workmind"
+      domain: "ROSSIMETALLI"
+
+# ── RDP (per gestionali senza DB accessibile) ─────────────────────────────────
+rdp:
+  enabled: false
+  host: "192.168.1.20"
+  port: 3389
+  username: "WorkMind_RDP"
+  # password: env WORKMIND_RDP_PASSWORD
+  screenshot_interval_minutes: 15
+  target_windows:
+    - "Gestionale Zucchetti"
+    - "Magazzino"
+
+# ── NLP personalizzazione ─────────────────────────────────────────────────────
+# Entità custom specifiche del settore/azienda
+custom_entities:
+  - "codice_articolo"
+  - "codice_cliente"
+  - "numero_commessa"
+
+# Tipi di documento che il bot deve classificare
+document_types:
+  - "fattura"
+  - "ordine"
+  - "DDT"
+  - "contratto"
+  - "offerta"
+  - "disegno_tecnico"
+  - "scheda_tecnica"
+  - "email"
+  - "altro"
