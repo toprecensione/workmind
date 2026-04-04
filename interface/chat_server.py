@@ -81,7 +81,6 @@ class ChatServer:
                 f"Assistente operativo per {self._company.name}. "
                 f"Scrivi /help per la lista comandi."
             ),
-            theme="soft",
         )
         demo.launch(
             server_name="0.0.0.0",

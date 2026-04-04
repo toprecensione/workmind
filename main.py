@@ -4,7 +4,7 @@ WorkMind — Main Entry Point
 CONFIDENTIAL - PRIVATE REPOSITORY - NOT FOR PUBLIC DISTRIBUTION
 
 Usage:
-    python main.py [--scan-dirs /path/a /path/b] [--update-now] [--once] [--no-chat] [--no-dashboard]
+    python main.py [--scan-dirs /path/a /path/b] [--update-now] [--once]
 """
 
 from __future__ import annotations
@@ -51,18 +51,12 @@ def parse_args() -> argparse.Namespace:
         "--once", action="store_true",
         help="Run one scan/analyse/report cycle then exit",
     )
-    parser.add_argument(
-        "--no-chat", action="store_true",
-        help="Disable chat interface (Gradio on port 7860)",
-    )
-    parser.add_argument(
-        "--no-dashboard", action="store_true",
-        help="Disable dashboard (Flask on port 7861)",
-    )
     return parser.parse_args()
 
 
 def main() -> int:
+    global _shutdown
+
     args = parse_args()
     company = get_company_config()
 
@@ -115,23 +109,21 @@ def main() -> int:
     except Exception as exc:
         log.warning(f"Report scheduler non avviato: {exc}", action=LogAction.STARTUP)
 
-    # ── Start chat interface ──────────────────────────────────────────────
-    if not args.no_chat:
-        try:
-            from interface.chat_server import ChatServer
-            chat = ChatServer(port=7860)
-            chat.start()
-        except Exception as exc:
-            log.warning(f"Chat server non avviato: {exc}", action=LogAction.STARTUP)
+    # ── Start Web UI (Apple-style) ────────────────────────────────────────
+    try:
+        from interface.web_ui import WorkMindUI
+        ui = WorkMindUI(port=7860)
+        ui.start()
+    except Exception as exc:
+        log.warning(f"Web UI non avviata: {exc}", action=LogAction.STARTUP)
 
-    # ── Start dashboard ───────────────────────────────────────────────────
-    if not args.no_dashboard:
-        try:
-            from interface.dashboard import DashboardServer
-            dashboard = DashboardServer(port=7861)
-            dashboard.start()
-        except Exception as exc:
-            log.warning(f"Dashboard non avviata: {exc}", action=LogAction.STARTUP)
+    # ── Start Telegram Bot ────────────────────────────────────────────────
+    try:
+        from interface.telegram_bot import WorkMindTelegramBot
+        tg_bot = WorkMindTelegramBot()
+        tg_bot.start()
+    except Exception as exc:
+        log.warning(f"Telegram bot non avviato: {exc}", action=LogAction.STARTUP)
 
     # ── Periodic update check ─────────────────────────────────────────────
     updater         = AutoUpdater()
@@ -140,9 +132,7 @@ def main() -> int:
 
     # ── Main loop ─────────────────────────────────────────────────────────
     log.info(
-        f"WorkMind is running — chat: {'ON' if not args.no_chat else 'OFF'}, "
-        f"dashboard: {'ON' if not args.no_dashboard else 'OFF'}. "
-        f"Press Ctrl+C to stop.",
+        "WorkMind is running — UI: http://0.0.0.0:7860 — Press Ctrl+C to stop.",
         action=LogAction.STARTUP, status=LogStatus.OK,
     )
     try:
@@ -150,13 +140,16 @@ def main() -> int:
             now = time.time()
             if now - last_update_check >= update_interval:
                 last_update_check = now
-                updated = updater.check_and_update()
-                if updated:
-                    log.info(
-                        "Update applied — scheduling graceful restart",
-                        action=LogAction.UPDATE, status=LogStatus.OK,
-                    )
-                    _shutdown = True
+                try:
+                    updated = updater.check_and_update()
+                    if updated:
+                        log.info(
+                            "Update applied — scheduling graceful restart",
+                            action=LogAction.UPDATE, status=LogStatus.OK,
+                        )
+                        _shutdown = True
+                except Exception:
+                    pass
             time.sleep(5)
     except KeyboardInterrupt:
         pass
@@ -174,7 +167,6 @@ def main() -> int:
 def _start_connectors(company) -> None:
     """Avvia i connettori dati in base alla configurazione aziendale."""
 
-    # Database
     if company.database.enabled:
         try:
             from connectors.database import DatabaseConnector
@@ -186,7 +178,6 @@ def _start_connectors(company) -> None:
         except Exception as exc:
             log.warning(f"Database connector non avviato: {exc}", action=LogAction.STARTUP)
 
-    # Email
     if company.email.enabled:
         try:
             from connectors.email_connector import EmailConnector
@@ -196,7 +187,6 @@ def _start_connectors(company) -> None:
         except Exception as exc:
             log.warning(f"Email connector non avviato: {exc}", action=LogAction.STARTUP)
 
-    # SMB file watcher
     if company.smb.enabled:
         try:
             from connectors.smb_watcher import SmbWatcher
@@ -205,7 +195,6 @@ def _start_connectors(company) -> None:
         except Exception as exc:
             log.warning(f"SMB watcher non avviato: {exc}", action=LogAction.STARTUP)
 
-    # RDP capture
     if company.rdp.enabled:
         try:
             from connectors.rdp_capture import RdpCapture
