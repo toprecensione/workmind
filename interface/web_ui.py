@@ -175,14 +175,14 @@ class WorkMindUI:
                 except Exception:
                     pass
 
-                # Supermemory: memoria avanzata + profilo utente
+                # Mem0: memoria avanzata locale (DeepSeek + HuggingFace + Qdrant)
                 memory_context = ""
                 try:
-                    from storage.supermemory_store import get_supermemory
-                    sm = get_supermemory()
-                    if sm.available:
+                    from storage.mem0_store import get_mem0
+                    mem = get_mem0()
+                    if mem.available:
                         user_id = session.get("username", "supervisor")
-                        memory_context = sm.build_memory_context(message, user_id=user_id)
+                        memory_context = mem.build_memory_context(message, user_id=user_id)
                 except Exception:
                     pass
 
@@ -202,16 +202,16 @@ class WorkMindUI:
                     role=ModelRole.FAST, max_tokens=1024, temperature=0.3,
                 )
 
-                # Salva conversazione in supermemory (background)
+                # Salva conversazione in Mem0 (background)
                 try:
-                    from storage.supermemory_store import get_supermemory
-                    sm = get_supermemory()
-                    if sm.available:
+                    from storage.mem0_store import get_mem0
+                    mem = get_mem0()
+                    if mem.available:
                         import threading
                         threading.Thread(
-                            target=sm.add_conversation,
+                            target=mem.add_conversation,
                             args=(message, response),
-                            kwargs={"user_id": session.get("username", "supervisor"), "source": "web"},
+                            kwargs={"user_id": session.get("username", "supervisor")},
                             daemon=True,
                         ).start()
                 except Exception:
@@ -249,46 +249,58 @@ class WorkMindUI:
                     get_vector_store().index_fact(fact, source="web_ui")
                 except Exception:
                     pass
-                # Sync to supermemory
+                # Sync to Mem0
                 try:
-                    from storage.supermemory_store import get_supermemory
-                    get_supermemory().add_fact(fact, source="web_ui")
+                    from storage.mem0_store import get_mem0
+                    get_mem0().add_fact(fact, source="web_ui")
                 except Exception:
                     pass
                 return jsonify({"ok": True, "message": f"Memorizzato: {fact}"})
             return jsonify({"ok": False, "message": "Nessun fatto specificato"})
 
-        # ── API: Supermemory ──────────────────────────────────────────────
-        @app.route("/api/supermemory/stats")
+        # ── API: Mem0 Memory ──────────────────────────────────────────────
+        @app.route("/api/memory/stats")
         @_require_auth
-        def api_sm_stats():
+        def api_mem_stats():
             try:
-                from storage.supermemory_store import get_supermemory
-                return jsonify(get_supermemory().stats())
+                from storage.mem0_store import get_mem0
+                return jsonify(get_mem0().stats())
             except Exception:
                 return jsonify({"available": False})
 
-        @app.route("/api/supermemory/sync", methods=["POST"])
+        @app.route("/api/memory/sync", methods=["POST"])
         @_require_auth
-        def api_sm_sync():
+        def api_mem_sync():
             try:
-                from storage.supermemory_store import get_supermemory
-                result = get_supermemory().sync_from_kb()
+                from storage.mem0_store import get_mem0
+                result = get_mem0().sync_from_kb()
                 return jsonify({"ok": True, **result})
             except Exception as exc:
                 return jsonify({"ok": False, "error": str(exc)})
 
-        @app.route("/api/supermemory/search", methods=["POST"])
+        @app.route("/api/memory/search", methods=["POST"])
         @_require_auth
-        def api_sm_search():
+        def api_mem_search():
             data = request.get_json()
             query = data.get("query", "")
+            user_id = data.get("user_id", "system")
             try:
-                from storage.supermemory_store import get_supermemory
-                results = get_supermemory().search(query, limit=10)
+                from storage.mem0_store import get_mem0
+                results = get_mem0().search(query, user_id=user_id, limit=10)
                 return jsonify({"results": results})
             except Exception as exc:
                 return jsonify({"results": [], "error": str(exc)})
+
+        @app.route("/api/memory/all")
+        @_require_auth
+        def api_mem_all():
+            user_id = request.args.get("user_id", "system")
+            try:
+                from storage.mem0_store import get_mem0
+                memories = get_mem0().get_all(user_id=user_id)
+                return jsonify({"memories": memories})
+            except Exception as exc:
+                return jsonify({"memories": [], "error": str(exc)})
 
         # ── API: RAG ─────────────────────────────────────────────────────
         @app.route("/api/rag/stats")
@@ -379,7 +391,6 @@ class WorkMindUI:
             "deepseek_api_key": os.getenv("DEEPSEEK_API_KEY", ""),
             "anthropic_api_key": os.getenv("ANTHROPIC_API_KEY", ""),
             "telegram_token": os.getenv("TELEGRAM_BOT_TOKEN", ""),
-            "supermemory_api_key": os.getenv("SUPERMEMORY_API_KEY", ""),
             "network_shares": [],
             "smb_username": "",
             "smb_password": "",
@@ -891,8 +902,8 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
           <input class="form-input" id="s-telegram-token" type="password" placeholder="123456:ABC...">
         </div>
         <div class="form-group">
-          <label class="form-label">Supermemory API Key</label>
-          <input class="form-input" id="s-supermemory-key" type="password" placeholder="sm-...">
+          <label class="form-label">Mem0 AI Memory</label>
+          <input class="form-input" id="s-mem0-status" disabled value="Locale (DeepSeek + Qdrant)" style="background:#f0f0f0;color:var(--green)">
         </div>
       </div>
     </div>
@@ -1164,7 +1175,6 @@ async function loadSettings() {
   document.getElementById('s-deepseek-key').value = s.deepseek_api_key || '';
   document.getElementById('s-anthropic-key').value = s.anthropic_api_key || '';
   document.getElementById('s-telegram-token').value = s.telegram_token || '';
-  document.getElementById('s-supermemory-key').value = s.supermemory_api_key || '';
   document.getElementById('s-smb-user').value = s.smb_username || '';
   document.getElementById('s-smb-pass').value = s.smb_password || '';
   document.getElementById('s-smb-domain').value = s.smb_domain || '';
@@ -1219,7 +1229,6 @@ async function saveSettings() {
     deepseek_api_key: document.getElementById('s-deepseek-key').value,
     anthropic_api_key: document.getElementById('s-anthropic-key').value,
     telegram_token: document.getElementById('s-telegram-token').value,
-    supermemory_api_key: document.getElementById('s-supermemory-key').value,
     smb_username: document.getElementById('s-smb-user').value,
     smb_password: document.getElementById('s-smb-pass').value,
     smb_domain: document.getElementById('s-smb-domain').value,

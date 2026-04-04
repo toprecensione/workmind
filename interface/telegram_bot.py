@@ -252,8 +252,8 @@ class WorkMindTelegramBot:
                 except Exception:
                     pass
                 try:
-                    from storage.supermemory_store import get_supermemory
-                    get_supermemory().add_fact(fact, source="telegram")
+                    from storage.mem0_store import get_mem0
+                    get_mem0().add_fact(fact, source="telegram")
                 except Exception:
                     pass
                 return f"Memorizzato: _{fact}_"
@@ -282,14 +282,14 @@ class WorkMindTelegramBot:
             except Exception:
                 pass
 
-            # Supermemory: memoria avanzata + profilo utente
+            # Mem0: memoria avanzata locale
             memory_context = ""
             try:
-                from storage.supermemory_store import get_supermemory
-                sm = get_supermemory()
-                if sm.available:
+                from storage.mem0_store import get_mem0
+                mem = get_mem0()
+                if mem.available:
                     user_id = f"tg_{chat_id}" if chat_id else "telegram"
-                    memory_context = sm.build_memory_context(text, user_id=user_id)
+                    memory_context = mem.build_memory_context(text, user_id=user_id)
             except Exception:
                 pass
 
@@ -310,16 +310,16 @@ class WorkMindTelegramBot:
                 max_tokens=300, temperature=0.3,
             )
 
-            # Salva conversazione in supermemory (background)
+            # Salva conversazione in Mem0 (background)
             try:
-                from storage.supermemory_store import get_supermemory
-                sm = get_supermemory()
-                if sm.available:
+                from storage.mem0_store import get_mem0
+                mem = get_mem0()
+                if mem.available:
                     import threading as _t
                     _t.Thread(
-                        target=sm.add_conversation,
+                        target=mem.add_conversation,
                         args=(text, response),
-                        kwargs={"user_id": f"tg_{chat_id}" if chat_id else "telegram", "source": "telegram"},
+                        kwargs={"user_id": f"tg_{chat_id}" if chat_id else "telegram"},
                         daemon=True,
                     ).start()
             except Exception:
