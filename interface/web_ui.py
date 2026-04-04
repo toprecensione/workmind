@@ -11,15 +11,17 @@ Single-page app con:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import threading
 import time
 from datetime import datetime, timezone
+from functools import wraps
 from pathlib import Path
 from typing import Optional
 
-from flask import Flask, jsonify, request, render_template_string
+from flask import Flask, jsonify, redirect, request, render_template_string, session, url_for
 
 from config.settings import config, DATA_DIR
 from config.company import get_company_config, load_company_config, CompanyConfig
@@ -34,11 +36,43 @@ log = get_logger("interface.web_ui")
 
 _SETTINGS_FILE = DATA_DIR / "ui_settings.json"
 
+_DEFAULT_USERNAME = "admin"
+_DEFAULT_PASSWORD = "workmind"
+
+
+def _hash_password(password: str) -> str:
+    """Hash a password with SHA-256."""
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
+
+
+def _get_credentials() -> tuple[str, str]:
+    """Return (username, password_hash) from ui_settings.json or defaults."""
+    if _SETTINGS_FILE.exists():
+        try:
+            saved = json.loads(_SETTINGS_FILE.read_text(encoding="utf-8"))
+            username = saved.get("auth_username", _DEFAULT_USERNAME)
+            pw_hash = saved.get("auth_password_hash", _hash_password(_DEFAULT_PASSWORD))
+            return username, pw_hash
+        except Exception:
+            pass
+    return _DEFAULT_USERNAME, _hash_password(_DEFAULT_PASSWORD)
+
+
+def _require_auth(f):
+    """Decorator that redirects to /login if not authenticated."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not session.get("authenticated"):
+            return redirect("/login")
+        return f(*args, **kwargs)
+    return wrapper
+
 
 class WorkMindUI:
     def __init__(self, port: int = 7860) -> None:
         self._port = port
         self._app = Flask("workmind")
+        self._app.secret_key = os.getenv("WORKMIND_SECRET_KEY", "wm-secret-change-me-2026")
         self._ai = get_ai_client()
         self._kb = get_kb()
         self._budget = get_budget()
@@ -59,12 +93,33 @@ class WorkMindUI:
     def _register_routes(self):
         app = self._app
 
+        @app.route("/login", methods=["GET", "POST"])
+        def login():
+            error = ""
+            if request.method == "POST":
+                username = request.form.get("username", "")
+                password = request.form.get("password", "")
+                exp_user, exp_hash = _get_credentials()
+                if username == exp_user and _hash_password(password) == exp_hash:
+                    session["authenticated"] = True
+                    session["username"] = username
+                    return redirect("/")
+                error = "Credenziali non valide"
+            return render_template_string(_LOGIN_TEMPLATE, error=error)
+
+        @app.route("/logout")
+        def logout():
+            session.clear()
+            return redirect("/login")
+
         @app.route("/")
+        @_require_auth
         def index():
             return render_template_string(_HTML_TEMPLATE, company=self._company.name)
 
         # ── API: Status ───────────────────────────────────────────────────
         @app.route("/api/status")
+        @_require_auth
         def api_status():
             uptime = int(time.time() - self._start_time)
             h, m = divmod(uptime // 60, 60)
@@ -81,19 +136,23 @@ class WorkMindUI:
             })
 
         @app.route("/api/budget")
+        @_require_auth
         def api_budget():
             return jsonify(self._budget.daily_summary())
 
         @app.route("/api/audit")
+        @_require_auth
         def api_audit():
             return jsonify(self._audit.recent(30))
 
         @app.route("/api/kb")
+        @_require_auth
         def api_kb():
             return jsonify(self._kb.summary())
 
         # ── API: Chat ─────────────────────────────────────────────────────
         @app.route("/api/chat", methods=["POST"])
+        @_require_auth
         def api_chat():
             data = request.get_json()
             message = data.get("message", "").strip()
@@ -105,13 +164,23 @@ class WorkMindUI:
                 reply = self._handle_command(message)
                 return jsonify({"reply": reply})
 
-            # Chat with DeepSeek
+            # Chat with DeepSeek (RAG-enhanced)
             try:
                 context = self._kb.build_context_prompt()
+                # RAG: ricerca semantica nei documenti indicizzati
+                rag_context = ""
+                try:
+                    from storage.vector_store import get_vector_store
+                    rag_context = get_vector_store().build_rag_context(message)
+                except Exception:
+                    pass
+
                 system = (
                     f"Sei WorkMind, l'assistente operativo intelligente di {self._company.name}. "
                     f"Rispondi in italiano in modo conciso e professionale.\n"
                 )
+                if rag_context:
+                    system += f"\n{rag_context}\n"
                 if context:
                     system += f"\n{context}\n"
 
@@ -125,10 +194,12 @@ class WorkMindUI:
 
         # ── API: Settings ─────────────────────────────────────────────────
         @app.route("/api/settings", methods=["GET"])
+        @_require_auth
         def get_settings():
             return jsonify(self._load_settings())
 
         @app.route("/api/settings", methods=["POST"])
+        @_require_auth
         def save_settings():
             data = request.get_json()
             self._save_settings(data)
@@ -137,13 +208,63 @@ class WorkMindUI:
             return jsonify({"ok": True})
 
         @app.route("/api/teach", methods=["POST"])
+        @_require_auth
         def api_teach():
             data = request.get_json()
             fact = data.get("fact", "").strip()
             if fact:
                 self._kb.teach_fact(fact, taught_by="web_ui")
+                # Index in vector store
+                try:
+                    from storage.vector_store import get_vector_store
+                    get_vector_store().index_fact(fact, source="web_ui")
+                except Exception:
+                    pass
                 return jsonify({"ok": True, "message": f"Memorizzato: {fact}"})
             return jsonify({"ok": False, "message": "Nessun fatto specificato"})
+
+        # ── API: RAG ─────────────────────────────────────────────────────
+        @app.route("/api/rag/stats")
+        @_require_auth
+        def api_rag_stats():
+            try:
+                from storage.vector_store import get_vector_store
+                return jsonify(get_vector_store().stats())
+            except Exception:
+                return jsonify({"available": False, "count": 0})
+
+        @app.route("/api/rag/reindex", methods=["POST"])
+        @_require_auth
+        def api_rag_reindex():
+            try:
+                from storage.vector_store import get_vector_store
+                stats = get_vector_store().reindex_all()
+                return jsonify({"ok": True, **stats})
+            except Exception as exc:
+                return jsonify({"ok": False, "error": str(exc)})
+
+        # ── API: Backups ─────────────────────────────────────────────────
+        @app.route("/api/backups")
+        @_require_auth
+        def api_backups():
+            from storage.backup import get_backup_manager
+            return jsonify(get_backup_manager().list_backups())
+
+        @app.route("/api/backups/create", methods=["POST"])
+        @_require_auth
+        def api_backup_create():
+            from storage.backup import get_backup_manager
+            path = get_backup_manager().create_backup()
+            return jsonify({"ok": True, "path": path})
+
+        @app.route("/api/backups/restore", methods=["POST"])
+        @_require_auth
+        def api_backup_restore():
+            data = request.get_json()
+            name = data.get("backup_name", "")
+            from storage.backup import get_backup_manager
+            ok = get_backup_manager().restore_backup(name)
+            return jsonify({"ok": ok})
 
     # ── Command handler ───────────────────────────────────────────────────
 
@@ -275,6 +396,63 @@ class WorkMindUI:
             # No yaml available, save only to JSON
             pass
 
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Login Template
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_LOGIN_TEMPLATE = r"""
+<!DOCTYPE html>
+<html lang="it">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WorkMind — Login</title>
+<style>
+:root {
+  --bg: #f5f5f7; --card: #ffffff; --text: #1d1d1f; --text2: #86868b;
+  --accent: #0071e3; --accent-hover: #0077ED; --red: #ff3b30;
+  --border: #d2d2d7; --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.04);
+  --radius: 12px; --font: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: var(--font); background: var(--bg); color: var(--text);
+       display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+.login-card {
+  background: var(--card); border-radius: 16px; padding: 48px 40px; width: 380px;
+  box-shadow: var(--shadow); border: 1px solid var(--border); text-align: center;
+}
+.login-card h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 6px; }
+.login-card .subtitle { color: var(--text2); font-size: 14px; margin-bottom: 32px; }
+.login-card input {
+  width: 100%; padding: 12px 16px; border-radius: 10px; border: 1px solid var(--border);
+  font-size: 15px; font-family: var(--font); outline: none; margin-bottom: 14px;
+  transition: border-color 0.2s;
+}
+.login-card input:focus { border-color: var(--accent); }
+.login-card button {
+  width: 100%; padding: 13px; border-radius: 10px; border: none;
+  background: var(--accent); color: white; font-size: 16px; font-weight: 600;
+  font-family: var(--font); cursor: pointer; transition: background 0.2s; margin-top: 6px;
+}
+.login-card button:hover { background: var(--accent-hover); }
+.error { color: var(--red); font-size: 13px; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+<div class="login-card">
+  <h1>WorkMind</h1>
+  <div class="subtitle">Accedi per continuare</div>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="POST" action="/login">
+    <input name="username" placeholder="Username" autofocus required>
+    <input name="password" type="password" placeholder="Password" required>
+    <button type="submit">Accedi</button>
+  </form>
+</div>
+</body>
+</html>
+"""
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # HTML Template — Apple-Style Single Page App
@@ -511,6 +689,7 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
   <div class="sidebar-footer">
     <span class="status-dot"></span> Online<br>
     <span id="footer-uptime" style="margin-top:4px;display:block"></span>
+    <a href="/logout" style="display:inline-block;margin-top:8px;font-size:12px;color:var(--red);text-decoration:none">Logout</a>
   </div>
 </div>
 

@@ -8,14 +8,28 @@ da qualsiasi luogo. Usa la stessa logica della chat web.
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import tempfile
 import threading
 import time
 import traceback
 from typing import Optional
 
 import httpx
+
+try:
+    import speech_recognition as sr
+    _HAS_SR = True
+except ImportError:
+    _HAS_SR = False
+
+try:
+    from pydub import AudioSegment
+    _HAS_PYDUB = True
+except ImportError:
+    _HAS_PYDUB = False
 
 from ai_client.client import get_ai_client, AIMessage, ModelRole
 from storage.knowledge_base import get_kb
@@ -42,6 +56,16 @@ class WorkMindTelegramBot:
         self._running = False
         self._offset = 0
         self._thread: Optional[threading.Thread] = None
+        self._notifier = None
+
+    def _get_notifier(self):
+        if self._notifier is None:
+            try:
+                from interface.telegram_notifications import get_notifier
+                self._notifier = get_notifier()
+            except Exception:
+                pass
+        return self._notifier
 
     def start(self) -> None:
         if not _TG_TOKEN:
@@ -69,10 +93,19 @@ class WorkMindTelegramBot:
                     for update in data.get("result", []):
                         self._offset = update["update_id"] + 1
                         msg = update.get("message", {})
-                        text = msg.get("text", "")
                         chat_id = msg.get("chat", {}).get("id")
-                        if text and chat_id:
-                            reply = self._handle(text)
+                        if not chat_id:
+                            continue
+                        # Voice messages (voice or video_note)
+                        voice = msg.get("voice") or msg.get("voice_note")
+                        if voice:
+                            reply = self._handle_voice(client, voice)
+                            self._send(client, chat_id, reply)
+                            continue
+                        # Text messages
+                        text = msg.get("text", "")
+                        if text:
+                            reply = self._handle(text, chat_id)
                             self._send(client, chat_id, reply)
             except Exception:
                 time.sleep(5)
@@ -85,10 +118,109 @@ class WorkMindTelegramBot:
         except Exception:
             pass
 
-    def _handle(self, text: str) -> str:
+    # ---- Voice message handling ------------------------------------------------
+
+    def _handle_voice(self, client: httpx.Client, voice: dict) -> str:
+        """Download a Telegram voice message, transcribe it via speech_recognition, then process as text."""
+        if not _HAS_SR or not _HAS_PYDUB:
+            return (
+                "Non posso trascrivere messaggi vocali: librerie mancanti "
+                "(speech_recognition e/o pydub). Installa con:\n"
+                "`pip install SpeechRecognition pydub`\n"
+                "e assicurati che ffmpeg sia nel PATH."
+            )
+
+        file_id = voice.get("file_id")
+        if not file_id:
+            return "Errore: messaggio vocale senza file_id."
+
+        try:
+            transcription = self._transcribe_voice(client, file_id)
+        except Exception as exc:
+            log.error(f"Trascrizione vocale fallita: {exc}", action=LogAction.STARTUP)
+            return f"Non sono riuscito a trascrivere il messaggio vocale.\nErrore: {exc}"
+
+        # Process transcribed text through the normal handler
+        reply = self._handle(transcription)
+        return f"🎤 _{transcription}_\n\n{reply}"
+
+    def _transcribe_voice(self, client: httpx.Client, file_id: str) -> str:
+        """Download .ogg from Telegram, convert to .wav, transcribe with Google STT."""
+        # Step 1: get file path from Telegram
+        resp = client.get(f"{_TG_API}/getFile", params={"file_id": file_id})
+        resp.raise_for_status()
+        file_path = resp.json()["result"]["file_path"]
+
+        # Step 2: download the file bytes
+        download_url = f"https://api.telegram.org/file/bot{_TG_TOKEN}/{file_path}"
+        dl_resp = client.get(download_url)
+        dl_resp.raise_for_status()
+        ogg_bytes = dl_resp.content
+
+        # Step 3: convert .ogg -> .wav using pydub (requires ffmpeg)
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as ogg_f:
+            ogg_f.write(ogg_bytes)
+            ogg_path = ogg_f.name
+
+        try:
+            wav_path = ogg_path.replace(".ogg", ".wav")
+            audio_seg = AudioSegment.from_ogg(ogg_path)
+            audio_seg.export(wav_path, format="wav")
+        finally:
+            try:
+                os.unlink(ogg_path)
+            except OSError:
+                pass
+
+        # Step 4: transcribe with speech_recognition (Google free STT, Italian)
+        try:
+            recognizer = sr.Recognizer()
+            with sr.AudioFile(wav_path) as source:
+                audio_data = recognizer.record(source)
+            text = recognizer.recognize_google(audio_data, language="it-IT")
+        finally:
+            try:
+                os.unlink(wav_path)
+            except OSError:
+                pass
+
+        if not text or not text.strip():
+            raise ValueError("La trascrizione è vuota.")
+        return text.strip()
+
+    # ---- Text message handling -------------------------------------------------
+
+    def _handle(self, text: str, chat_id: int = 0) -> str:
         text = text.strip()
         if text.startswith("/start"):
-            return f"Ciao! Sono WorkMind, l'assistente operativo di *{self._company.name}*.\n\nComandi:\n/status - Stato bot\n/budget - Spesa AI\n/teach <fatto> - Insegna\n/help - Aiuto\n\nOppure scrivimi una domanda!"
+            # Auto-subscribe alle notifiche
+            notifier = self._get_notifier()
+            if notifier and chat_id:
+                notifier.subscribe(chat_id)
+            return (
+                f"Ciao! Sono WorkMind, l'assistente operativo di *{self._company.name}*.\n\n"
+                f"Comandi:\n/status - Stato bot\n/budget - Spesa AI\n"
+                f"/teach <fatto> - Insegna\n/subscribe - Notifiche\n"
+                f"/unsubscribe - Disattiva notifiche\n/mute - Pausa notifiche\n"
+                f"/unmute - Riprendi notifiche\n/help - Aiuto\n\n"
+                f"Oppure scrivimi una domanda o invia un vocale!"
+            )
+
+        if text.startswith("/subscribe"):
+            notifier = self._get_notifier()
+            return notifier.subscribe(chat_id) if notifier and chat_id else "Notifiche non disponibili."
+
+        if text.startswith("/unsubscribe"):
+            notifier = self._get_notifier()
+            return notifier.unsubscribe(chat_id) if notifier and chat_id else "Notifiche non disponibili."
+
+        if text.startswith("/mute"):
+            notifier = self._get_notifier()
+            return notifier.mute(chat_id) if notifier and chat_id else "Notifiche non disponibili."
+
+        if text.startswith("/unmute"):
+            notifier = self._get_notifier()
+            return notifier.unmute(chat_id) if notifier and chat_id else "Notifiche non disponibili."
 
         if text.startswith("/status"):
             kb = self._kb.summary()
@@ -114,6 +246,11 @@ class WorkMindTelegramBot:
             fact = text[7:].strip()
             if fact:
                 self._kb.teach_fact(fact, taught_by="telegram")
+                try:
+                    from storage.vector_store import get_vector_store
+                    get_vector_store().index_fact(fact, source="telegram")
+                except Exception:
+                    pass
                 return f"Memorizzato: _{fact}_"
             return "Uso: /teach <fatto>"
 
@@ -123,18 +260,30 @@ class WorkMindTelegramBot:
                 "/status - Stato del bot\n"
                 "/budget - Spesa AI giornaliera\n"
                 "/teach <fatto> - Insegna un fatto\n"
+                "/subscribe - Attiva notifiche proattive\n"
+                "/unsubscribe - Disattiva notifiche\n"
+                "/mute / /unmute - Pausa notifiche\n"
                 "/help - Questo messaggio\n\n"
-                "Oppure scrivi una domanda in linguaggio naturale!"
+                "Puoi anche inviare messaggi vocali!"
             )
 
-        # Chat libera con DeepSeek
+        # Chat libera con DeepSeek (RAG-enhanced)
         try:
             context = self._kb.build_context_prompt()
+            rag_context = ""
+            try:
+                from storage.vector_store import get_vector_store
+                rag_context = get_vector_store().build_rag_context(text)
+            except Exception:
+                pass
+
             system = (
                 f"Sei WorkMind, assistente operativo di {self._company.name}. "
                 f"Rispondi in italiano, in modo conciso (max 500 caratteri). "
                 f"Stai rispondendo via Telegram.\n"
             )
+            if rag_context:
+                system += f"\n{rag_context}\n"
             if context:
                 system += f"\n{context}\n"
 

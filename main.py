@@ -125,6 +125,24 @@ def main() -> int:
     except Exception as exc:
         log.warning(f"Telegram bot non avviato: {exc}", action=LogAction.STARTUP)
 
+    # ── Start Telegram Notifications ──────────────────────────────────────
+    tg_notifier = None
+    try:
+        from interface.telegram_notifications import get_notifier
+        tg_notifier = get_notifier()
+        tg_notifier.start()
+    except Exception as exc:
+        log.warning(f"Telegram notifier non avviato: {exc}", action=LogAction.STARTUP)
+
+    # ── Start Backup Manager ──────────────────────────────────────────────
+    backup_mgr = None
+    try:
+        from storage.backup import get_backup_manager
+        backup_mgr = get_backup_manager()
+        backup_mgr.start(interval_hours=24)
+    except Exception as exc:
+        log.warning(f"Backup manager non avviato: {exc}", action=LogAction.STARTUP)
+
     # ── Periodic update check ─────────────────────────────────────────────
     updater         = AutoUpdater()
     update_interval = config.update.check_interval_minutes * 60
@@ -158,6 +176,10 @@ def main() -> int:
         mw.stop()
         if report_sched:
             report_sched.stop()
+        if tg_notifier:
+            tg_notifier.stop()
+        if backup_mgr:
+            backup_mgr.stop()
         agent.stop()
         log.info("WorkMind stopped cleanly.", action=LogAction.SHUTDOWN, status=LogStatus.STOPPED)
 
