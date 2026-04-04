@@ -251,6 +251,11 @@ class WorkMindTelegramBot:
                     get_vector_store().index_fact(fact, source="telegram")
                 except Exception:
                     pass
+                try:
+                    from storage.supermemory_store import get_supermemory
+                    get_supermemory().add_fact(fact, source="telegram")
+                except Exception:
+                    pass
                 return f"Memorizzato: _{fact}_"
             return "Uso: /teach <fatto>"
 
@@ -267,7 +272,7 @@ class WorkMindTelegramBot:
                 "Puoi anche inviare messaggi vocali!"
             )
 
-        # Chat libera con DeepSeek (RAG-enhanced)
+        # Chat libera con DeepSeek (RAG + Supermemory enhanced)
         try:
             context = self._kb.build_context_prompt()
             rag_context = ""
@@ -277,11 +282,24 @@ class WorkMindTelegramBot:
             except Exception:
                 pass
 
+            # Supermemory: memoria avanzata + profilo utente
+            memory_context = ""
+            try:
+                from storage.supermemory_store import get_supermemory
+                sm = get_supermemory()
+                if sm.available:
+                    user_id = f"tg_{chat_id}" if chat_id else "telegram"
+                    memory_context = sm.build_memory_context(text, user_id=user_id)
+            except Exception:
+                pass
+
             system = (
                 f"Sei WorkMind, assistente operativo di {self._company.name}. "
                 f"Rispondi in italiano, in modo conciso (max 500 caratteri). "
                 f"Stai rispondendo via Telegram.\n"
             )
+            if memory_context:
+                system += f"\n{memory_context}\n"
             if rag_context:
                 system += f"\n{rag_context}\n"
             if context:
@@ -291,6 +309,22 @@ class WorkMindTelegramBot:
                 text, system_prompt=system, role=ModelRole.FAST,
                 max_tokens=300, temperature=0.3,
             )
+
+            # Salva conversazione in supermemory (background)
+            try:
+                from storage.supermemory_store import get_supermemory
+                sm = get_supermemory()
+                if sm.available:
+                    import threading as _t
+                    _t.Thread(
+                        target=sm.add_conversation,
+                        args=(text, response),
+                        kwargs={"user_id": f"tg_{chat_id}" if chat_id else "telegram", "source": "telegram"},
+                        daemon=True,
+                    ).start()
+            except Exception:
+                pass
+
             return response
         except Exception as exc:
             return f"Errore: {exc}"

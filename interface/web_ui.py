@@ -164,10 +164,10 @@ class WorkMindUI:
                 reply = self._handle_command(message)
                 return jsonify({"reply": reply})
 
-            # Chat with DeepSeek (RAG-enhanced)
+            # Chat with DeepSeek (RAG + Supermemory enhanced)
             try:
                 context = self._kb.build_context_prompt()
-                # RAG: ricerca semantica nei documenti indicizzati
+                # RAG: ricerca semantica nei documenti indicizzati (ChromaDB)
                 rag_context = ""
                 try:
                     from storage.vector_store import get_vector_store
@@ -175,10 +175,23 @@ class WorkMindUI:
                 except Exception:
                     pass
 
+                # Supermemory: memoria avanzata + profilo utente
+                memory_context = ""
+                try:
+                    from storage.supermemory_store import get_supermemory
+                    sm = get_supermemory()
+                    if sm.available:
+                        user_id = session.get("username", "supervisor")
+                        memory_context = sm.build_memory_context(message, user_id=user_id)
+                except Exception:
+                    pass
+
                 system = (
                     f"Sei WorkMind, l'assistente operativo intelligente di {self._company.name}. "
                     f"Rispondi in italiano in modo conciso e professionale.\n"
                 )
+                if memory_context:
+                    system += f"\n{memory_context}\n"
                 if rag_context:
                     system += f"\n{rag_context}\n"
                 if context:
@@ -188,6 +201,22 @@ class WorkMindUI:
                     message, system_prompt=system,
                     role=ModelRole.FAST, max_tokens=1024, temperature=0.3,
                 )
+
+                # Salva conversazione in supermemory (background)
+                try:
+                    from storage.supermemory_store import get_supermemory
+                    sm = get_supermemory()
+                    if sm.available:
+                        import threading
+                        threading.Thread(
+                            target=sm.add_conversation,
+                            args=(message, response),
+                            kwargs={"user_id": session.get("username", "supervisor"), "source": "web"},
+                            daemon=True,
+                        ).start()
+                except Exception:
+                    pass
+
                 return jsonify({"reply": response})
             except Exception as exc:
                 return jsonify({"reply": f"Errore AI: {exc}"})
@@ -220,8 +249,46 @@ class WorkMindUI:
                     get_vector_store().index_fact(fact, source="web_ui")
                 except Exception:
                     pass
+                # Sync to supermemory
+                try:
+                    from storage.supermemory_store import get_supermemory
+                    get_supermemory().add_fact(fact, source="web_ui")
+                except Exception:
+                    pass
                 return jsonify({"ok": True, "message": f"Memorizzato: {fact}"})
             return jsonify({"ok": False, "message": "Nessun fatto specificato"})
+
+        # ── API: Supermemory ──────────────────────────────────────────────
+        @app.route("/api/supermemory/stats")
+        @_require_auth
+        def api_sm_stats():
+            try:
+                from storage.supermemory_store import get_supermemory
+                return jsonify(get_supermemory().stats())
+            except Exception:
+                return jsonify({"available": False})
+
+        @app.route("/api/supermemory/sync", methods=["POST"])
+        @_require_auth
+        def api_sm_sync():
+            try:
+                from storage.supermemory_store import get_supermemory
+                result = get_supermemory().sync_from_kb()
+                return jsonify({"ok": True, **result})
+            except Exception as exc:
+                return jsonify({"ok": False, "error": str(exc)})
+
+        @app.route("/api/supermemory/search", methods=["POST"])
+        @_require_auth
+        def api_sm_search():
+            data = request.get_json()
+            query = data.get("query", "")
+            try:
+                from storage.supermemory_store import get_supermemory
+                results = get_supermemory().search(query, limit=10)
+                return jsonify({"results": results})
+            except Exception as exc:
+                return jsonify({"results": [], "error": str(exc)})
 
         # ── API: RAG ─────────────────────────────────────────────────────
         @app.route("/api/rag/stats")
@@ -312,6 +379,7 @@ class WorkMindUI:
             "deepseek_api_key": os.getenv("DEEPSEEK_API_KEY", ""),
             "anthropic_api_key": os.getenv("ANTHROPIC_API_KEY", ""),
             "telegram_token": os.getenv("TELEGRAM_BOT_TOKEN", ""),
+            "supermemory_api_key": os.getenv("SUPERMEMORY_API_KEY", ""),
             "network_shares": [],
             "smb_username": "",
             "smb_password": "",
@@ -822,7 +890,10 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
           <label class="form-label">Telegram Bot Token</label>
           <input class="form-input" id="s-telegram-token" type="password" placeholder="123456:ABC...">
         </div>
-        <div class="form-group"></div>
+        <div class="form-group">
+          <label class="form-label">Supermemory API Key</label>
+          <input class="form-input" id="s-supermemory-key" type="password" placeholder="sm-...">
+        </div>
       </div>
     </div>
 
@@ -1093,6 +1164,7 @@ async function loadSettings() {
   document.getElementById('s-deepseek-key').value = s.deepseek_api_key || '';
   document.getElementById('s-anthropic-key').value = s.anthropic_api_key || '';
   document.getElementById('s-telegram-token').value = s.telegram_token || '';
+  document.getElementById('s-supermemory-key').value = s.supermemory_api_key || '';
   document.getElementById('s-smb-user').value = s.smb_username || '';
   document.getElementById('s-smb-pass').value = s.smb_password || '';
   document.getElementById('s-smb-domain').value = s.smb_domain || '';
@@ -1147,6 +1219,7 @@ async function saveSettings() {
     deepseek_api_key: document.getElementById('s-deepseek-key').value,
     anthropic_api_key: document.getElementById('s-anthropic-key').value,
     telegram_token: document.getElementById('s-telegram-token').value,
+    supermemory_api_key: document.getElementById('s-supermemory-key').value,
     smb_username: document.getElementById('s-smb-user').value,
     smb_password: document.getElementById('s-smb-pass').value,
     smb_domain: document.getElementById('s-smb-domain').value,
