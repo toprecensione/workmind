@@ -81,6 +81,14 @@ class WorkMindUI:
         self._company = get_company_config()
         self._start_time = time.time()
         self._register_routes()
+        # Registra route WhatsApp webhook e API
+        try:
+            from interface.whatsapp_bot import get_whatsapp_bot
+            self._wa_bot = get_whatsapp_bot()
+            self._wa_bot.register_routes(self._app)
+            log.info("WhatsApp webhook routes registrate", action=LogAction.STARTUP, status=LogStatus.OK)
+        except Exception as exc:
+            log.warning(f"WhatsApp routes non registrate: {exc}", action=LogAction.STARTUP)
 
     def start(self) -> None:
         t = threading.Thread(target=self._run, daemon=True, name="WebUI")
@@ -853,6 +861,9 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
     <div class="nav-item" onclick="showPage('features')">
       <span class="icon">&#128161;</span> Richieste
     </div>
+    <div class="nav-item" onclick="showPage('whatsapp')">
+      <span class="icon">&#128172;</span> WhatsApp
+    </div>
     <div class="nav-item" onclick="showPage('settings')">
       <span class="icon">&#9881;</span> Impostazioni
     </div>
@@ -950,6 +961,72 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
         </select>
       </div>
       <div id="features-list"></div>
+    </div>
+  </div>
+
+  <!-- WhatsApp -->
+  <div class="page" id="page-whatsapp">
+    <div class="page-title">WhatsApp Business</div>
+
+    <!-- Stats -->
+    <div class="settings-section">
+      <h3>&#128200; Statistiche</h3>
+      <div id="wa-stats" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px">
+        <div class="card"><div class="card-value" id="wa-contacts">-</div><div class="card-label">Contatti</div></div>
+        <div class="card"><div class="card-value" id="wa-consented">-</div><div class="card-label">Con consenso</div></div>
+        <div class="card"><div class="card-value" id="wa-orders-total">-</div><div class="card-label">Ordini totali</div></div>
+        <div class="card"><div class="card-value" id="wa-orders-pending">-</div><div class="card-label">Ordini in attesa</div></div>
+      </div>
+    </div>
+
+    <!-- Invia messaggio -->
+    <div class="settings-section">
+      <h3>&#9993; Invia Messaggio</h3>
+      <div style="display:flex;gap:8px;margin-bottom:8px">
+        <input class="form-input" id="wa-send-phone" placeholder="+39..." style="width:200px">
+        <input class="form-input" id="wa-send-text" placeholder="Messaggio..." style="flex:1">
+        <button class="btn-primary" onclick="waSend()">Invia</button>
+      </div>
+    </div>
+
+    <!-- Ordini -->
+    <div class="settings-section">
+      <h3>&#128230; Ordini Recenti</h3>
+      <button class="btn-primary" onclick="loadWaOrders()" style="padding:6px 16px;font-size:13px;margin-bottom:12px">Aggiorna</button>
+      <div id="wa-orders-list"></div>
+    </div>
+
+    <!-- Contatti -->
+    <div class="settings-section">
+      <h3>&#128100; Contatti</h3>
+      <button class="btn-primary" onclick="loadWaContacts()" style="padding:6px 16px;font-size:13px;margin-bottom:12px">Aggiorna</button>
+      <div id="wa-contacts-list"></div>
+    </div>
+
+    <!-- Policy -->
+    <div class="settings-section">
+      <h3>&#128274; Policy &amp; Privacy</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Ordini abilitati</label>
+          <select class="form-select" id="wa-orders-enabled"><option value="true">Si</option><option value="false">No</option></select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Conferma ordini richiesta</label>
+          <select class="form-select" id="wa-order-confirm"><option value="true">Si</option><option value="false">No</option></select>
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Solo orario lavorativo</label>
+          <select class="form-select" id="wa-biz-hours"><option value="false">No</option><option value="true">Si</option></select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Max valore ordine (0=illimitato)</label>
+          <input class="form-input" id="wa-max-order" type="number" value="0">
+        </div>
+      </div>
+      <button class="btn-primary" onclick="saveWaPolicy()" style="margin-top:8px">Salva Policy</button>
     </div>
   </div>
 
@@ -1180,10 +1257,11 @@ function showPage(name) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.getElementById('page-' + name).classList.add('active');
   document.querySelectorAll('.nav-item')[
-    {dashboard:0, chat:1, audit:2, features:3, settings:4}[name]
+    {dashboard:0, chat:1, audit:2, features:3, whatsapp:4, settings:5}[name]
   ].classList.add('active');
   if (name === 'audit') loadAudit();
   if (name === 'features') loadFeatures();
+  if (name === 'whatsapp') loadWhatsApp();
 }
 
 // ── Toast ────────────────────────────────────────────────────
@@ -1379,6 +1457,107 @@ async function saveSettings() {
     body: JSON.stringify(data)
   });
   showToast('Impostazioni salvate!');
+}
+
+// ── WhatsApp ────────────────────────────────────────────────
+async function loadWhatsApp() {
+  loadWaStats();
+  loadWaOrders();
+  loadWaContacts();
+  loadWaPolicy();
+}
+
+async function loadWaStats() {
+  try {
+    const r = await fetch('/api/whatsapp/stats');
+    const d = await r.json();
+    document.getElementById('wa-contacts').textContent = d.total_contacts || 0;
+    document.getElementById('wa-consented').textContent = d.consented_chat || 0;
+    document.getElementById('wa-orders-total').textContent = d.total_orders || 0;
+    document.getElementById('wa-orders-pending').textContent = d.pending_orders || 0;
+  } catch(e) {
+    document.getElementById('wa-contacts').textContent = '-';
+  }
+}
+
+async function loadWaOrders() {
+  try {
+    const r = await fetch('/api/whatsapp/orders');
+    const d = await r.json();
+    const list = document.getElementById('wa-orders-list');
+    if (!d.orders || !d.orders.length) { list.innerHTML = '<p style="color:var(--text-secondary)">Nessun ordine.</p>'; return; }
+    const icons = {pending:'&#9203;',confirmed:'&#9989;',cancelled:'&#10060;',shipped:'&#128230;',delivered:'&#127881;',completed:'&#9989;'};
+    list.innerHTML = d.orders.map(o => {
+      const icon = icons[o.status] || '&#10067;';
+      const date = new Date(o.created_at).toLocaleString('it-IT');
+      const ph = o.phone ? o.phone.slice(0,3)+'***'+o.phone.slice(-3) : '?';
+      return `<div style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:6px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <strong>#${o.id} — ${o.description.slice(0,50)}</strong>
+          <span style="font-size:12px">${icon} ${o.status}</span>
+        </div>
+        <div style="font-size:11px;color:var(--text-secondary);margin-top:4px">${ph} — ${date}</div>
+      </div>`;
+    }).join('');
+  } catch(e) {}
+}
+
+async function loadWaContacts() {
+  try {
+    const r = await fetch('/api/whatsapp/contacts');
+    const d = await r.json();
+    const list = document.getElementById('wa-contacts-list');
+    if (!d.contacts || !d.contacts.length) { list.innerHTML = '<p style="color:var(--text-secondary)">Nessun contatto.</p>'; return; }
+    list.innerHTML = d.contacts.map(c => {
+      const ph = c.phone ? c.phone.slice(0,3)+'***'+c.phone.slice(-3) : '?';
+      const last = new Date(c.last_seen).toLocaleString('it-IT');
+      return `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:13px">
+        <span><strong>${c.name || ph}</strong> (${ph})</span>
+        <span style="color:var(--text-secondary)">${c.messages} msg — ${last}</span>
+      </div>`;
+    }).join('');
+  } catch(e) {}
+}
+
+async function loadWaPolicy() {
+  try {
+    const r = await fetch('/api/whatsapp/policy');
+    const d = await r.json();
+    document.getElementById('wa-orders-enabled').value = String(d.enabled !== false);
+    document.getElementById('wa-order-confirm').value = String(d.require_confirmation !== false);
+    document.getElementById('wa-biz-hours').value = String(!!d.business_hours_only);
+    document.getElementById('wa-max-order').value = d.max_order_value || 0;
+  } catch(e) {}
+}
+
+async function saveWaPolicy() {
+  await fetch('/api/whatsapp/policy', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({
+      orders_enabled: document.getElementById('wa-orders-enabled').value === 'true',
+      order_require_confirmation: document.getElementById('wa-order-confirm').value === 'true',
+      business_hours_only: document.getElementById('wa-biz-hours').value === 'true',
+      max_order_value: parseFloat(document.getElementById('wa-max-order').value) || 0,
+    })
+  });
+  showToast('Policy WhatsApp salvata!');
+}
+
+async function waSend() {
+  const phone = document.getElementById('wa-send-phone').value.trim();
+  const text = document.getElementById('wa-send-text').value.trim();
+  if (!phone || !text) return;
+  const r = await fetch('/api/whatsapp/send', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({phone, text})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    showToast('Messaggio inviato!');
+    document.getElementById('wa-send-text').value = '';
+  } else {
+    showToast('Errore: ' + (d.error || 'invio fallito'));
+  }
 }
 
 // ── Features ────────────────────────────────────────────────
