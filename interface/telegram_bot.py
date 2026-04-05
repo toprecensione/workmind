@@ -110,6 +110,50 @@ class WorkMindTelegramBot:
             except Exception:
                 time.sleep(5)
 
+    def _send_to(self, chat_id: int, text: str) -> None:
+        """Send message to a specific chat_id (standalone, no existing client)."""
+        try:
+            with httpx.Client(timeout=10) as c:
+                c.post(f"{_TG_API}/sendMessage", json={
+                    "chat_id": chat_id, "text": text, "parse_mode": "Markdown",
+                })
+        except Exception:
+            pass
+
+    def _notify_master_new_request(self, req: dict) -> None:
+        """Notifica tutti i master di una nuova richiesta REVIEW."""
+        try:
+            from mindwork.feature_requests import get_feature_manager
+            fm = get_feature_manager()
+            masters = fm.get_master_chat_ids()
+            if not masters:
+                return
+            msg = (
+                f"*🔔 Nuova richiesta #{req['id']}*\n\n"
+                f"*Titolo:* {req['title']}\n"
+                f"*Da:* {req['submitted_by']} ({req['source']})\n"
+                f"*Livello:* `{req['level'].upper()}`\n"
+                f"*Descrizione:* {req['description'][:200]}\n\n"
+                f"Rispondi con:\n"
+                f"/approve {req['id']} — Approva\n"
+                f"/reject {req['id']} [motivo] — Rifiuta"
+            )
+            for mid in masters:
+                self._send_to(mid, msg)
+        except Exception:
+            pass
+
+    def _notify_requester(self, req: dict, action: str) -> None:
+        """Notifica il richiedente dell'esito."""
+        cid = req.get("chat_id")
+        if not cid:
+            return
+        icon = "✅" if action == "approvata" else "❌"
+        msg = f"{icon} *Richiesta #{req['id']} {action}*\n{req['title']}"
+        if req.get("reject_reason"):
+            msg += f"\nMotivo: {req['reject_reason']}"
+        self._send_to(cid, msg)
+
     def _send(self, client: httpx.Client, chat_id: int, text: str) -> None:
         try:
             client.post(f"{_TG_API}/sendMessage", json={
@@ -199,10 +243,14 @@ class WorkMindTelegramBot:
                 notifier.subscribe(chat_id)
             return (
                 f"Ciao! Sono WorkMind, l'assistente operativo di *{self._company.name}*.\n\n"
-                f"Comandi:\n/status - Stato bot\n/budget - Spesa AI\n"
-                f"/teach <fatto> - Insegna\n/subscribe - Notifiche\n"
-                f"/unsubscribe - Disattiva notifiche\n/mute - Pausa notifiche\n"
-                f"/unmute - Riprendi notifiche\n/help - Aiuto\n\n"
+                f"*Comandi:*\n"
+                f"/status - Stato bot\n/budget - Spesa AI\n"
+                f"/teach <fatto> - Insegna\n"
+                f"/request <descrizione> - Richiedi funzionalita'\n"
+                f"/requests - Vedi richieste\n"
+                f"/subscribe - Notifiche\n"
+                f"/help - Aiuto\n\n"
+                f"*Master:* /master /approve /reject\n\n"
                 f"Oppure scrivimi una domanda o invia un vocale!"
             )
 
@@ -259,16 +307,129 @@ class WorkMindTelegramBot:
                 return f"Memorizzato: _{fact}_"
             return "Uso: /teach <fatto>"
 
+        # ── Feature Requests ──────────────────────────────────────────
+        if text.startswith("/request "):
+            desc = text[9:].strip()
+            if not desc:
+                return "Uso: /request <descrizione della funzionalita'>"
+            try:
+                from mindwork.feature_requests import get_feature_manager
+                fm = get_feature_manager()
+                req = fm.submit_request(desc, submitted_by=f"tg_{chat_id}", source="telegram", chat_id=chat_id)
+                level = req['level'].upper()
+                status = req['status']
+
+                reply = f"*Richiesta #{req['id']}*\n\n"
+                reply += f"*Titolo:* {req['title']}\n"
+                reply += f"*Livello:* `{level}`\n"
+
+                if status == "blocked":
+                    reply += f"\n*BLOCCATA:* {req['reason']}"
+                elif status == "auto_done":
+                    reply += "\n*Eseguita automaticamente!*"
+                else:
+                    reply += f"\n*In attesa di approvazione dal master.*"
+                    if req.get("github_issue"):
+                        reply += f"\nIssue: {req['github_issue']['url']}"
+                    # Notifica master
+                    self._notify_master_new_request(req)
+
+                return reply
+            except Exception as exc:
+                return f"Errore: {exc}"
+
+        if text.startswith("/requests"):
+            try:
+                from mindwork.feature_requests import get_feature_manager
+                fm = get_feature_manager()
+                reqs = fm.list_requests(limit=10)
+                if not reqs:
+                    return "Nessuna richiesta."
+                lines = ["*Ultime richieste:*\n"]
+                for r in reqs:
+                    icon = {"pending": "⏳", "classified": "⏳", "issue_created": "📝",
+                            "approved": "✅", "rejected": "❌", "blocked": "🚫",
+                            "auto_done": "⚡", "deployed": "🚀", "pr_created": "🔀"}.get(r["status"], "❓")
+                    lines.append(f"{icon} *#{r['id']}* {r['title'][:40]} — `{r['status']}`")
+                return "\n".join(lines)
+            except Exception as exc:
+                return f"Errore: {exc}"
+
+        if text.startswith("/approve"):
+            try:
+                from mindwork.feature_requests import get_feature_manager
+                fm = get_feature_manager()
+                if not fm.is_master(chat_id):
+                    return "Solo il master puo' approvare richieste. Usa /master per registrarti."
+                parts = text.split()
+                if len(parts) < 2:
+                    return "Uso: /approve <numero>"
+                req_id = int(parts[1])
+                req = fm.approve(req_id, approved_by=f"tg_{chat_id}")
+                if not req:
+                    return f"Richiesta #{req_id} non trovata."
+                reply = f"*Richiesta #{req_id} APPROVATA*\n{req['title']}"
+                if req.get("github_issue"):
+                    reply += f"\nIssue: {req['github_issue']['url']}"
+                # Notifica chi ha fatto la richiesta
+                self._notify_requester(req, "approvata")
+                return reply
+            except ValueError:
+                return "Uso: /approve <numero>"
+            except Exception as exc:
+                return f"Errore: {exc}"
+
+        if text.startswith("/reject"):
+            try:
+                from mindwork.feature_requests import get_feature_manager
+                fm = get_feature_manager()
+                if not fm.is_master(chat_id):
+                    return "Solo il master puo' rifiutare richieste."
+                parts = text.split(maxsplit=2)
+                if len(parts) < 2:
+                    return "Uso: /reject <numero> [motivo]"
+                req_id = int(parts[1])
+                reason = parts[2] if len(parts) > 2 else ""
+                req = fm.reject(req_id, rejected_by=f"tg_{chat_id}", reason=reason)
+                if not req:
+                    return f"Richiesta #{req_id} non trovata."
+                self._notify_requester(req, "rifiutata")
+                return f"*Richiesta #{req_id} RIFIUTATA*\n{req['title']}"
+            except ValueError:
+                return "Uso: /reject <numero> [motivo]"
+            except Exception as exc:
+                return f"Errore: {exc}"
+
+        if text.startswith("/master"):
+            try:
+                from mindwork.feature_requests import get_feature_manager
+                fm = get_feature_manager()
+                # Prima registrazione: il primo che usa /master diventa master
+                masters = fm.get_master_chat_ids()
+                if not masters or chat_id in masters:
+                    fm.register_master(chat_id)
+                    return "Registrato come *master*. Puoi usare /approve e /reject."
+                else:
+                    return "C'e' gia' un master registrato. Contatta l'amministratore."
+            except Exception as exc:
+                return f"Errore: {exc}"
+
         if text.startswith("/help"):
             return (
                 "*Comandi WorkMind*\n\n"
+                "*Generali:*\n"
                 "/status - Stato del bot\n"
                 "/budget - Spesa AI giornaliera\n"
                 "/teach <fatto> - Insegna un fatto\n"
-                "/subscribe - Attiva notifiche proattive\n"
-                "/unsubscribe - Disattiva notifiche\n"
-                "/mute / /unmute - Pausa notifiche\n"
-                "/help - Questo messaggio\n\n"
+                "/subscribe /unsubscribe - Notifiche\n"
+                "/mute /unmute - Pausa notifiche\n\n"
+                "*Feature Requests:*\n"
+                "/request <descrizione> - Richiedi funzionalita'\n"
+                "/requests - Lista richieste\n\n"
+                "*Master (admin):*\n"
+                "/master - Registrati come master\n"
+                "/approve <n> - Approva richiesta\n"
+                "/reject <n> [motivo] - Rifiuta richiesta\n\n"
                 "Puoi anche inviare messaggi vocali!"
             )
 

@@ -345,6 +345,95 @@ class WorkMindUI:
             ok = get_backup_manager().restore_backup(name)
             return jsonify({"ok": ok})
 
+        # ── API: Feature Requests ─────────────────────────────────────
+        @app.route("/api/features")
+        @_require_auth
+        def api_features():
+            from mindwork.feature_requests import get_feature_manager
+            status_filter = request.args.get("status")
+            reqs = get_feature_manager().list_requests(status=status_filter, limit=50)
+            return jsonify({"requests": reqs})
+
+        @app.route("/api/features/stats")
+        @_require_auth
+        def api_features_stats():
+            from mindwork.feature_requests import get_feature_manager
+            return jsonify(get_feature_manager().stats())
+
+        @app.route("/api/features/submit", methods=["POST"])
+        @_require_auth
+        def api_features_submit():
+            data = request.get_json()
+            text = data.get("text", "").strip()
+            if not text:
+                return jsonify({"ok": False, "error": "Descrizione vuota"})
+            from mindwork.feature_requests import get_feature_manager
+            req = get_feature_manager().submit_request(
+                text, submitted_by=session.get("username", "web"), source="web"
+            )
+            return jsonify({"ok": True, "request": req})
+
+        @app.route("/api/features/approve", methods=["POST"])
+        @_require_auth
+        def api_features_approve():
+            data = request.get_json()
+            req_id = data.get("id", 0)
+            from mindwork.feature_requests import get_feature_manager
+            req = get_feature_manager().approve(int(req_id), approved_by=session.get("username", "web"))
+            return jsonify({"ok": bool(req), "request": req})
+
+        @app.route("/api/features/reject", methods=["POST"])
+        @_require_auth
+        def api_features_reject():
+            data = request.get_json()
+            req_id = data.get("id", 0)
+            reason = data.get("reason", "")
+            from mindwork.feature_requests import get_feature_manager
+            req = get_feature_manager().reject(int(req_id), rejected_by=session.get("username", "web"), reason=reason)
+            return jsonify({"ok": bool(req), "request": req})
+
+        # ── GitHub Webhook — Auto-deploy after merge ────────────────────
+        @app.route("/webhook/github", methods=["POST"])
+        def webhook_github():
+            import hmac
+            import subprocess
+            payload = request.get_data()
+            # Verify signature if secret is set
+            secret = os.getenv("GITHUB_WEBHOOK_SECRET", "")
+            if secret:
+                sig = request.headers.get("X-Hub-Signature-256", "")
+                expected = "sha256=" + hmac.new(
+                    secret.encode(), payload, hashlib.sha256
+                ).hexdigest()
+                if not hmac.compare_digest(sig, expected):
+                    return jsonify({"error": "Invalid signature"}), 403
+
+            data = request.get_json(silent=True) or {}
+            ref = data.get("ref", "")
+            # Only deploy on push to main
+            if ref != "refs/heads/main":
+                return jsonify({"ok": True, "action": "ignored", "ref": ref})
+
+            log.info("GitHub webhook: push to main — starting auto-deploy",
+                     action=LogAction.UPDATE, status=LogStatus.OK)
+
+            def _do_deploy():
+                try:
+                    subprocess.run(
+                        ["git", "pull", "origin", "main"],
+                        cwd=str(Path(__file__).resolve().parent.parent),
+                        capture_output=True, text=True, timeout=60,
+                    )
+                    subprocess.run(
+                        ["sudo", "systemctl", "restart", "workmind"],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                except Exception as exc:
+                    log.warning(f"Auto-deploy failed: {exc}", action=LogAction.UPDATE)
+
+            threading.Thread(target=_do_deploy, daemon=True).start()
+            return jsonify({"ok": True, "action": "deploying"})
+
     # ── Command handler ───────────────────────────────────────────────────
 
     def _handle_command(self, msg: str) -> str:
@@ -761,6 +850,9 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
     <div class="nav-item" onclick="showPage('audit')">
       <span class="icon">&#9776;</span> Audit Trail
     </div>
+    <div class="nav-item" onclick="showPage('features')">
+      <span class="icon">&#128161;</span> Richieste
+    </div>
     <div class="nav-item" onclick="showPage('settings')">
       <span class="icon">&#9881;</span> Impostazioni
     </div>
@@ -829,6 +921,35 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
         <thead><tr><th>Quando</th><th>Tipo</th><th>Attore</th><th>Dettaglio</th></tr></thead>
         <tbody id="audit-tbody"></tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- Features -->
+  <div class="page" id="page-features">
+    <div class="page-title">Richieste Funzionalita'</div>
+    <div class="settings-section">
+      <h3>&#10133; Nuova Richiesta</h3>
+      <div style="display:flex;gap:8px">
+        <input class="form-input" id="feature-input" placeholder="Descrivi la funzionalita' che vorresti..." style="flex:1">
+        <button class="btn-primary" onclick="submitFeature()">Invia</button>
+      </div>
+      <div id="feature-result" style="margin-top:12px;font-size:13px"></div>
+    </div>
+    <div class="settings-section">
+      <h3>&#128203; Richieste</h3>
+      <div style="display:flex;gap:8px;margin-bottom:12px">
+        <button class="btn-primary" onclick="loadFeatures()" style="padding:6px 16px;font-size:13px">Aggiorna</button>
+        <select class="form-select" id="feature-filter" onchange="loadFeatures()" style="width:auto">
+          <option value="">Tutte</option>
+          <option value="pending">In attesa</option>
+          <option value="issue_created">Issue creata</option>
+          <option value="approved">Approvate</option>
+          <option value="rejected">Rifiutate</option>
+          <option value="blocked">Bloccate</option>
+          <option value="auto_done">Auto</option>
+        </select>
+      </div>
+      <div id="features-list"></div>
     </div>
   </div>
 
@@ -1059,9 +1180,10 @@ function showPage(name) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.getElementById('page-' + name).classList.add('active');
   document.querySelectorAll('.nav-item')[
-    {dashboard:0, chat:1, audit:2, settings:3}[name]
+    {dashboard:0, chat:1, audit:2, features:3, settings:4}[name]
   ].classList.add('active');
   if (name === 'audit') loadAudit();
+  if (name === 'features') loadFeatures();
 }
 
 // ── Toast ────────────────────────────────────────────────────
@@ -1257,6 +1379,85 @@ async function saveSettings() {
     body: JSON.stringify(data)
   });
   showToast('Impostazioni salvate!');
+}
+
+// ── Features ────────────────────────────────────────────────
+async function loadFeatures() {
+  const filter = document.getElementById('feature-filter').value;
+  const url = filter ? `/api/features?status=${filter}` : '/api/features';
+  const r = await fetch(url);
+  const data = await r.json();
+  const list = document.getElementById('features-list');
+  if (!data.requests || data.requests.length === 0) {
+    list.innerHTML = '<p style="color:var(--text-secondary);padding:16px">Nessuna richiesta trovata.</p>';
+    return;
+  }
+  const levelColors = {auto:'var(--green)',review:'var(--yellow)',block:'var(--red)'};
+  const statusLabels = {
+    pending:'In attesa',classified:'Classificata',approved:'Approvata',
+    rejected:'Rifiutata',issue_created:'Issue creata',pr_created:'PR creata',
+    deployed:'Deployata',auto_done:'Eseguita',blocked:'Bloccata'
+  };
+  list.innerHTML = data.requests.map(req => {
+    const lc = levelColors[req.level] || 'var(--text-secondary)';
+    const sl = statusLabels[req.status] || req.status;
+    const date = new Date(req.created_at).toLocaleString('it-IT');
+    const canAct = ['pending','classified','issue_created'].includes(req.status);
+    const actions = canAct ? `
+      <div style="margin-top:8px;display:flex;gap:8px">
+        <button class="btn-primary" onclick="approveFeature(${req.id})" style="padding:4px 12px;font-size:12px">Approva</button>
+        <button class="btn-primary" onclick="rejectFeature(${req.id})" style="padding:4px 12px;font-size:12px;background:var(--red)">Rifiuta</button>
+      </div>` : '';
+    const ghLink = req.github_issue ? `<a href="${req.github_issue.url}" target="_blank" style="color:var(--accent);font-size:12px">GitHub #${req.github_issue.number}</a>` : '';
+    return `<div style="background:var(--bg-primary);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:8px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <strong style="font-size:14px">#${req.id} — ${req.title}</strong>
+        <span style="font-size:11px;color:${lc};font-weight:600;text-transform:uppercase">${req.level}</span>
+      </div>
+      <p style="font-size:13px;color:var(--text-secondary);margin:4px 0">${req.description}</p>
+      <div style="display:flex;gap:12px;align-items:center;font-size:11px;color:var(--text-secondary)">
+        <span>${sl}</span><span>${date}</span><span>${req.submitted_by}</span>${ghLink}
+      </div>
+      ${actions}
+    </div>`;
+  }).join('');
+}
+
+async function submitFeature() {
+  const input = document.getElementById('feature-text');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  showToast('Invio richiesta...');
+  const r = await fetch('/api/features/submit', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({text})
+  });
+  const data = await r.json();
+  if (data.request) {
+    const lvl = data.request.level.toUpperCase();
+    showToast(`Richiesta #${data.request.id} classificata: ${lvl}`);
+  }
+  loadFeatures();
+}
+
+async function approveFeature(id) {
+  await fetch('/api/features/approve', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({id})
+  });
+  showToast(`Richiesta #${id} approvata`);
+  loadFeatures();
+}
+
+async function rejectFeature(id) {
+  const reason = prompt('Motivo del rifiuto (opzionale):') || '';
+  await fetch('/api/features/reject', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({id, reason})
+  });
+  showToast(`Richiesta #${id} rifiutata`);
+  loadFeatures();
 }
 
 // ── Init ─────────────────────────────────────────────────────
