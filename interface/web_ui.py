@@ -29,33 +29,13 @@ from ai_client.client import get_ai_client, AIMessage, ModelRole
 from ai_client.budget import get_budget
 from storage.knowledge_base import get_kb
 from storage.audit_trail import get_audit
+from storage.user_manager import get_user_manager, UserRole
 from mindwork.feedback import get_feedback
 from logging_system import get_logger, LogAction, LogStatus
 
 log = get_logger("interface.web_ui")
 
 _SETTINGS_FILE = DATA_DIR / "ui_settings.json"
-
-_DEFAULT_USERNAME = "admin"
-_DEFAULT_PASSWORD = "workmind"
-
-
-def _hash_password(password: str) -> str:
-    """Hash a password with SHA-256."""
-    return hashlib.sha256(password.encode("utf-8")).hexdigest()
-
-
-def _get_credentials() -> tuple[str, str]:
-    """Return (username, password_hash) from ui_settings.json or defaults."""
-    if _SETTINGS_FILE.exists():
-        try:
-            saved = json.loads(_SETTINGS_FILE.read_text(encoding="utf-8"))
-            username = saved.get("auth_username", _DEFAULT_USERNAME)
-            pw_hash = saved.get("auth_password_hash", _hash_password(_DEFAULT_PASSWORD))
-            return username, pw_hash
-        except Exception:
-            pass
-    return _DEFAULT_USERNAME, _hash_password(_DEFAULT_PASSWORD)
 
 
 def _require_auth(f):
@@ -64,6 +44,18 @@ def _require_auth(f):
     def wrapper(*args, **kwargs):
         if not session.get("authenticated"):
             return redirect("/login")
+        return f(*args, **kwargs)
+    return wrapper
+
+
+def _require_admin(f):
+    """Decorator che richiede ruolo admin."""
+    @wraps(f)
+    def wrapper(*args, **kwargs):
+        if not session.get("authenticated"):
+            return redirect("/login")
+        if session.get("role") != "admin":
+            return jsonify({"ok": False, "error": "Accesso riservato agli amministratori"}), 403
         return f(*args, **kwargs)
     return wrapper
 
@@ -105,15 +97,75 @@ class WorkMindUI:
         def login():
             error = ""
             if request.method == "POST":
-                username = request.form.get("username", "")
+                email = request.form.get("email", "").strip().lower()
                 password = request.form.get("password", "")
-                exp_user, exp_hash = _get_credentials()
-                if username == exp_user and _hash_password(password) == exp_hash:
+                um = get_user_manager()
+                user = um.authenticate(email, password)
+                if user:
                     session["authenticated"] = True
-                    session["username"] = username
+                    session["username"] = user["name"]
+                    session["email"] = user["email"]
+                    session["role"] = user["role"]
+                    if user.get("must_change_password"):
+                        return redirect("/change-password")
                     return redirect("/")
-                error = "Credenziali non valide"
+                error = "Email o password non validi"
             return render_template_string(_LOGIN_TEMPLATE, error=error)
+
+        @app.route("/change-password", methods=["GET", "POST"])
+        def change_password():
+            if not session.get("authenticated"):
+                return redirect("/login")
+            error = ""
+            success = ""
+            if request.method == "POST":
+                new_pw = request.form.get("new_password", "")
+                confirm = request.form.get("confirm_password", "")
+                if len(new_pw) < 8:
+                    error = "La password deve essere di almeno 8 caratteri"
+                elif new_pw != confirm:
+                    error = "Le password non coincidono"
+                else:
+                    um = get_user_manager()
+                    if um.change_password(session["email"], new_pw, changed_by=session["email"]):
+                        success = "Password cambiata con successo!"
+                        return redirect("/")
+                    else:
+                        error = "Errore nel cambio password"
+            return render_template_string(_CHANGE_PW_TEMPLATE, error=error, success=success)
+
+        @app.route("/forgot-password", methods=["GET", "POST"])
+        def forgot_password():
+            msg = ""
+            if request.method == "POST":
+                email = request.form.get("email", "").strip().lower()
+                um = get_user_manager()
+                base = request.host_url.rstrip("/")
+                um.request_password_reset(email, base_url=base)
+                msg = "Se l'email esiste, riceverai un link per il reset."
+            return render_template_string(_FORGOT_PW_TEMPLATE, msg=msg)
+
+        @app.route("/reset-password", methods=["GET", "POST"])
+        def reset_password():
+            token = request.args.get("token", "") or request.form.get("token", "")
+            error = ""
+            if request.method == "POST":
+                new_pw = request.form.get("new_password", "")
+                confirm = request.form.get("confirm_password", "")
+                if len(new_pw) < 8:
+                    error = "La password deve essere di almeno 8 caratteri"
+                elif new_pw != confirm:
+                    error = "Le password non coincidono"
+                else:
+                    um = get_user_manager()
+                    if um.use_reset_token(token, new_pw):
+                        return redirect("/login")
+                    error = "Token non valido o scaduto"
+            else:
+                um = get_user_manager()
+                if not um.verify_reset_token(token):
+                    error = "Token non valido o scaduto"
+            return render_template_string(_RESET_PW_TEMPLATE, error=error, token=token)
 
         @app.route("/logout")
         def logout():
@@ -236,7 +288,7 @@ class WorkMindUI:
             return jsonify(self._load_settings())
 
         @app.route("/api/settings", methods=["POST"])
-        @_require_auth
+        @_require_admin
         def save_settings():
             data = request.get_json()
             self._save_settings(data)
@@ -399,6 +451,98 @@ class WorkMindUI:
             from mindwork.feature_requests import get_feature_manager
             req = get_feature_manager().reject(int(req_id), rejected_by=session.get("username", "web"), reason=reason)
             return jsonify({"ok": bool(req), "request": req})
+
+        # ── User Management API (admin only) ─────────────────────────────
+        @app.route("/api/users")
+        @_require_admin
+        def api_users():
+            um = get_user_manager()
+            return jsonify({"users": um.list_users()})
+
+        @app.route("/api/users/create", methods=["POST"])
+        @_require_admin
+        def api_users_create():
+            data = request.get_json()
+            email = data.get("email", "").strip()
+            name = data.get("name", "")
+            role = data.get("role", "user")
+            password = data.get("password", "")
+            if not email:
+                return jsonify({"ok": False, "error": "Email richiesta"})
+            um = get_user_manager()
+            user = um.create_user(email, password, name=name, role=role,
+                                  created_by=session.get("email", "admin"))
+            if not user:
+                return jsonify({"ok": False, "error": "Utente gia' esistente"})
+            return jsonify({"ok": True, "user": user})
+
+        @app.route("/api/users/invite", methods=["POST"])
+        @_require_admin
+        def api_users_invite():
+            data = request.get_json()
+            email = data.get("email", "").strip()
+            name = data.get("name", "")
+            role = data.get("role", "user")
+            if not email:
+                return jsonify({"ok": False, "error": "Email richiesta"})
+            um = get_user_manager()
+            base = request.host_url.rstrip("/")
+            user = um.invite_user(email, role=role, name=name,
+                                  invited_by=session.get("email", "admin"),
+                                  base_url=base)
+            if not user:
+                return jsonify({"ok": False, "error": "Utente gia' esistente"})
+            return jsonify({"ok": True, "user": user})
+
+        @app.route("/api/users/update", methods=["POST"])
+        @_require_admin
+        def api_users_update():
+            data = request.get_json()
+            email = data.get("email", "")
+            updates = {k: v for k, v in data.items() if k in ("name", "role", "active")}
+            um = get_user_manager()
+            user = um.update_user(email, updates, updated_by=session.get("email", "admin"))
+            if not user:
+                return jsonify({"ok": False, "error": "Utente non trovato"})
+            return jsonify({"ok": True, "user": user})
+
+        @app.route("/api/users/delete", methods=["POST"])
+        @_require_admin
+        def api_users_delete():
+            data = request.get_json()
+            email = data.get("email", "")
+            um = get_user_manager()
+            ok = um.delete_user(email, deleted_by=session.get("email", "admin"))
+            if not ok:
+                return jsonify({"ok": False, "error": "Impossibile eliminare (admin predefinito?)"})
+            return jsonify({"ok": True})
+
+        @app.route("/api/users/reset-password", methods=["POST"])
+        @_require_admin
+        def api_users_reset_pw():
+            data = request.get_json()
+            email = data.get("email", "")
+            new_pw = data.get("password", "")
+            um = get_user_manager()
+            if new_pw:
+                ok = um.change_password(email, new_pw, changed_by=session.get("email", "admin"))
+            else:
+                base = request.host_url.rstrip("/")
+                ok = um.request_password_reset(email, base_url=base)
+            return jsonify({"ok": ok})
+
+        @app.route("/api/smtp/test", methods=["POST"])
+        @_require_admin
+        def api_smtp_test():
+            um = get_user_manager()
+            return jsonify(um.test_smtp())
+
+        @app.route("/api/me")
+        @_require_auth
+        def api_me():
+            um = get_user_manager()
+            user = um.get_user(session.get("email", ""))
+            return jsonify({"user": user, "is_admin": session.get("role") == "admin"})
 
         # ── GitHub Webhook — Auto-deploy after merge ────────────────────
         @app.route("/webhook/github", methods=["POST"])
@@ -577,17 +721,10 @@ class WorkMindUI:
 # Login Template
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_LOGIN_TEMPLATE = r"""
-<!DOCTYPE html>
-<html lang="it">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>WorkMind — Login</title>
-<style>
+_AUTH_STYLE = """
 :root {
   --bg: #f5f5f7; --card: #ffffff; --text: #1d1d1f; --text2: #86868b;
-  --accent: #0071e3; --accent-hover: #0077ED; --red: #ff3b30;
+  --accent: #0071e3; --accent-hover: #0077ED; --red: #ff3b30; --green: #34c759;
   --border: #d2d2d7; --shadow: 0 1px 3px rgba(0,0,0,0.08), 0 4px 12px rgba(0,0,0,0.04);
   --radius: 12px; --font: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Segoe UI', Roboto, sans-serif;
 }
@@ -595,7 +732,7 @@ _LOGIN_TEMPLATE = r"""
 body { font-family: var(--font); background: var(--bg); color: var(--text);
        display: flex; align-items: center; justify-content: center; min-height: 100vh; }
 .login-card {
-  background: var(--card); border-radius: 16px; padding: 48px 40px; width: 380px;
+  background: var(--card); border-radius: 16px; padding: 48px 40px; width: 400px;
   box-shadow: var(--shadow); border: 1px solid var(--border); text-align: center;
 }
 .login-card h1 { font-size: 28px; font-weight: 700; letter-spacing: -0.5px; margin-bottom: 6px; }
@@ -613,21 +750,85 @@ body { font-family: var(--font); background: var(--bg); color: var(--text);
 }
 .login-card button:hover { background: var(--accent-hover); }
 .error { color: var(--red); font-size: 13px; margin-bottom: 12px; }
-</style>
-</head>
+.success { color: var(--green); font-size: 13px; margin-bottom: 12px; }
+.link { color: var(--accent); font-size: 13px; text-decoration: none; display: inline-block; margin-top: 16px; }
+.link:hover { text-decoration: underline; }
+"""
+
+_LOGIN_TEMPLATE = r"""
+<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WorkMind — Login</title><style>""" + _AUTH_STYLE + """</style></head>
 <body>
 <div class="login-card">
   <h1>WorkMind</h1>
-  <div class="subtitle">Accedi per continuare</div>
+  <div class="subtitle">Accedi con la tua email</div>
   {% if error %}<div class="error">{{ error }}</div>{% endif %}
   <form method="POST" action="/login">
-    <input name="username" placeholder="Username" autofocus required>
+    <input name="email" type="email" placeholder="Email" autofocus required>
     <input name="password" type="password" placeholder="Password" required>
     <button type="submit">Accedi</button>
   </form>
+  <a class="link" href="/forgot-password">Password dimenticata?</a>
 </div>
-</body>
-</html>
+</body></html>
+"""
+
+_CHANGE_PW_TEMPLATE = r"""
+<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WorkMind — Cambia Password</title><style>""" + _AUTH_STYLE + """</style></head>
+<body>
+<div class="login-card">
+  <h1>Cambia Password</h1>
+  <div class="subtitle">Devi impostare una nuova password</div>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  {% if success %}<div class="success">{{ success }}</div>{% endif %}
+  <form method="POST">
+    <input name="new_password" type="password" placeholder="Nuova password (min 8 caratteri)" required minlength="8">
+    <input name="confirm_password" type="password" placeholder="Conferma password" required>
+    <button type="submit">Cambia Password</button>
+  </form>
+</div>
+</body></html>
+"""
+
+_FORGOT_PW_TEMPLATE = r"""
+<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WorkMind — Reset Password</title><style>""" + _AUTH_STYLE + """</style></head>
+<body>
+<div class="login-card">
+  <h1>Reset Password</h1>
+  <div class="subtitle">Inserisci la tua email per ricevere il link di reset</div>
+  {% if msg %}<div class="success">{{ msg }}</div>{% endif %}
+  <form method="POST">
+    <input name="email" type="email" placeholder="La tua email" autofocus required>
+    <button type="submit">Invia Link Reset</button>
+  </form>
+  <a class="link" href="/login">Torna al login</a>
+</div>
+</body></html>
+"""
+
+_RESET_PW_TEMPLATE = r"""
+<!DOCTYPE html><html lang="it"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>WorkMind — Nuova Password</title><style>""" + _AUTH_STYLE + """</style></head>
+<body>
+<div class="login-card">
+  <h1>Nuova Password</h1>
+  <div class="subtitle">Scegli la tua nuova password</div>
+  {% if error %}<div class="error">{{ error }}</div>{% endif %}
+  <form method="POST">
+    <input type="hidden" name="token" value="{{ token }}">
+    <input name="new_password" type="password" placeholder="Nuova password (min 8 caratteri)" required minlength="8">
+    <input name="confirm_password" type="password" placeholder="Conferma password" required>
+    <button type="submit">Reimposta Password</button>
+  </form>
+  <a class="link" href="/login">Torna al login</a>
+</div>
+</body></html>
 """
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -864,7 +1065,10 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
     <div class="nav-item" onclick="showPage('whatsapp')">
       <span class="icon">&#128172;</span> WhatsApp
     </div>
-    <div class="nav-item" onclick="showPage('settings')">
+    <div class="nav-item admin-only" onclick="showPage('users')">
+      <span class="icon">&#128101;</span> Utenti
+    </div>
+    <div class="nav-item admin-only" onclick="showPage('settings')">
       <span class="icon">&#9881;</span> Impostazioni
     </div>
   </div>
@@ -1027,6 +1231,71 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
         </div>
       </div>
       <button class="btn-primary" onclick="saveWaPolicy()" style="margin-top:8px">Salva Policy</button>
+    </div>
+  </div>
+
+  <!-- Users (admin only) -->
+  <div class="page" id="page-users">
+    <div class="page-title">Gestione Utenti</div>
+
+    <!-- Invita utente -->
+    <div class="settings-section">
+      <h3>&#10133; Invita Utente</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Email</label>
+          <input class="form-input" id="inv-email" type="email" placeholder="utente@esempio.it">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Nome</label>
+          <input class="form-input" id="inv-name" placeholder="Mario Rossi">
+        </div>
+      </div>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Ruolo</label>
+          <select class="form-select" id="inv-role">
+            <option value="user">Utente</option>
+            <option value="admin">Amministratore</option>
+          </select>
+        </div>
+        <div class="form-group" style="display:flex;align-items:flex-end;gap:8px">
+          <button class="btn-primary" onclick="inviteUser()">Invita via Email</button>
+          <button class="btn-primary" onclick="createUserDirect()" style="background:var(--text2)">Crea Diretto</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Lista utenti -->
+    <div class="settings-section">
+      <h3>&#128101; Utenti Registrati</h3>
+      <button class="btn-primary" onclick="loadUsers()" style="padding:6px 16px;font-size:13px;margin-bottom:12px">Aggiorna</button>
+      <div id="users-list"></div>
+    </div>
+
+    <!-- SMTP Test -->
+    <div class="settings-section">
+      <h3>&#9993; SMTP</h3>
+      <div style="display:flex;gap:12px;align-items:center">
+        <button class="btn-primary" onclick="testSmtp()">Testa Connessione SMTP</button>
+        <span id="smtp-result" style="font-size:13px"></span>
+      </div>
+    </div>
+
+    <!-- Profilo personale -->
+    <div class="settings-section">
+      <h3>&#128274; La Tua Password</h3>
+      <div class="form-row">
+        <div class="form-group">
+          <label class="form-label">Nuova password</label>
+          <input class="form-input" id="my-new-pw" type="password" placeholder="Min 8 caratteri">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Conferma</label>
+          <input class="form-input" id="my-confirm-pw" type="password" placeholder="Ripeti password">
+        </div>
+      </div>
+      <button class="btn-primary" onclick="changeMyPassword()">Cambia Password</button>
     </div>
   </div>
 
@@ -1257,11 +1526,12 @@ function showPage(name) {
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.getElementById('page-' + name).classList.add('active');
   document.querySelectorAll('.nav-item')[
-    {dashboard:0, chat:1, audit:2, features:3, whatsapp:4, settings:5}[name]
+    {dashboard:0, chat:1, audit:2, features:3, whatsapp:4, users:5, settings:6}[name]
   ].classList.add('active');
   if (name === 'audit') loadAudit();
   if (name === 'features') loadFeatures();
   if (name === 'whatsapp') loadWhatsApp();
+  if (name === 'users') loadUsers();
 }
 
 // ── Toast ────────────────────────────────────────────────────
@@ -1459,6 +1729,151 @@ async function saveSettings() {
   showToast('Impostazioni salvate!');
 }
 
+// ── Users ───────────────────────────────────────────────────
+async function loadUsers() {
+  try {
+    const r = await fetch('/api/users');
+    if (r.status === 403) { document.getElementById('users-list').innerHTML = '<p style="color:var(--red)">Accesso riservato agli admin.</p>'; return; }
+    const d = await r.json();
+    const list = document.getElementById('users-list');
+    if (!d.users || !d.users.length) { list.innerHTML = '<p>Nessun utente.</p>'; return; }
+    list.innerHTML = d.users.map(u => {
+      const role = u.role === 'admin' ? '<span style="color:var(--accent);font-weight:600">ADMIN</span>' : '<span style="color:var(--text2)">USER</span>';
+      const status = u.active !== false ? '<span style="color:var(--green)">Attivo</span>' : '<span style="color:var(--red)">Disattivato</span>';
+      const lastLogin = u.last_login ? new Date(u.last_login).toLocaleString('it-IT') : 'Mai';
+      const isDefault = u.email === 'toprecensione@gmail.com';
+      const actions = !isDefault ? `
+        <button onclick="toggleUser('${u.email}', ${u.active === false})" style="padding:3px 8px;font-size:11px;border:1px solid var(--border);border-radius:6px;background:var(--card);cursor:pointer">${u.active !== false ? 'Disattiva' : 'Attiva'}</button>
+        <button onclick="deleteUser('${u.email}')" style="padding:3px 8px;font-size:11px;border:1px solid var(--red);border-radius:6px;background:var(--card);color:var(--red);cursor:pointer">Elimina</button>
+        <button onclick="resetUserPw('${u.email}')" style="padding:3px 8px;font-size:11px;border:1px solid var(--border);border-radius:6px;background:var(--card);cursor:pointer">Reset PW</button>
+      ` : '';
+      return `<div style="background:var(--bg-primary,#fafafa);border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:6px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div>
+            <strong>${u.name}</strong> ${role}<br>
+            <span style="font-size:12px;color:var(--text2)">${u.email}</span>
+          </div>
+          <div style="text-align:right;font-size:12px">
+            ${status}<br>
+            <span style="color:var(--text2)">Ultimo login: ${lastLogin}</span>
+          </div>
+        </div>
+        <div style="margin-top:6px;display:flex;gap:6px">${actions}</div>
+      </div>`;
+    }).join('');
+  } catch(e) {}
+}
+
+async function inviteUser() {
+  const email = document.getElementById('inv-email').value.trim();
+  const name = document.getElementById('inv-name').value.trim();
+  const role = document.getElementById('inv-role').value;
+  if (!email) return;
+  const r = await fetch('/api/users/invite', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({email, name, role})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    showToast('Invito inviato a ' + email);
+    document.getElementById('inv-email').value = '';
+    document.getElementById('inv-name').value = '';
+    loadUsers();
+  } else {
+    showToast('Errore: ' + (d.error || 'invito fallito'));
+  }
+}
+
+async function createUserDirect() {
+  const email = document.getElementById('inv-email').value.trim();
+  const name = document.getElementById('inv-name').value.trim();
+  const role = document.getElementById('inv-role').value;
+  if (!email) return;
+  const pw = prompt('Password per il nuovo utente (min 8 caratteri):');
+  if (!pw || pw.length < 8) { showToast('Password troppo corta'); return; }
+  const r = await fetch('/api/users/create', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({email, name, role, password: pw})
+  });
+  const d = await r.json();
+  if (d.ok) {
+    showToast('Utente creato: ' + email);
+    document.getElementById('inv-email').value = '';
+    document.getElementById('inv-name').value = '';
+    loadUsers();
+  } else {
+    showToast('Errore: ' + (d.error || 'creazione fallita'));
+  }
+}
+
+async function toggleUser(email, activate) {
+  await fetch('/api/users/update', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({email, active: activate})
+  });
+  showToast(activate ? 'Utente attivato' : 'Utente disattivato');
+  loadUsers();
+}
+
+async function deleteUser(email) {
+  if (!confirm('Eliminare ' + email + '?')) return;
+  const r = await fetch('/api/users/delete', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({email})
+  });
+  const d = await r.json();
+  showToast(d.ok ? 'Utente eliminato' : 'Errore: ' + (d.error || ''));
+  loadUsers();
+}
+
+async function resetUserPw(email) {
+  const choice = confirm('OK = Invia email reset\nAnnulla = Imposta manualmente');
+  if (choice) {
+    await fetch('/api/users/reset-password', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({email})
+    });
+    showToast('Email di reset inviata a ' + email);
+  } else {
+    const pw = prompt('Nuova password (min 8 caratteri):');
+    if (!pw || pw.length < 8) { showToast('Password troppo corta'); return; }
+    await fetch('/api/users/reset-password', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({email, password: pw})
+    });
+    showToast('Password cambiata per ' + email);
+  }
+}
+
+async function testSmtp() {
+  document.getElementById('smtp-result').textContent = 'Test in corso...';
+  const r = await fetch('/api/smtp/test', {method:'POST'});
+  const d = await r.json();
+  const el = document.getElementById('smtp-result');
+  if (d.ok) {
+    el.textContent = 'SMTP OK: ' + d.host + ':' + d.port;
+    el.style.color = 'var(--green)';
+  } else {
+    el.textContent = 'Errore: ' + (d.error || 'connessione fallita');
+    el.style.color = 'var(--red)';
+  }
+}
+
+async function changeMyPassword() {
+  const pw = document.getElementById('my-new-pw').value;
+  const confirm = document.getElementById('my-confirm-pw').value;
+  if (pw.length < 8) { showToast('Password troppo corta (min 8)'); return; }
+  if (pw !== confirm) { showToast('Le password non coincidono'); return; }
+  const me = await (await fetch('/api/me')).json();
+  await fetch('/api/users/reset-password', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({email: me.user.email, password: pw})
+  });
+  showToast('Password cambiata!');
+  document.getElementById('my-new-pw').value = '';
+  document.getElementById('my-confirm-pw').value = '';
+}
+
 // ── WhatsApp ────────────────────────────────────────────────
 async function loadWhatsApp() {
   loadWaStats();
@@ -1640,6 +2055,24 @@ async function rejectFeature(id) {
 }
 
 // ── Init ─────────────────────────────────────────────────────
+// Nascondi pagine admin se utente non e' admin
+(async function initAuth() {
+  try {
+    const r = await fetch('/api/me');
+    const d = await r.json();
+    if (!d.is_admin) {
+      document.querySelectorAll('.admin-only').forEach(el => el.style.display = 'none');
+    }
+    // Mostra nome utente nel footer
+    const footer = document.querySelector('.sidebar-footer');
+    if (footer && d.user) {
+      const nameEl = document.createElement('span');
+      nameEl.style.cssText = 'display:block;font-weight:600;font-size:12px;margin-bottom:4px';
+      nameEl.textContent = d.user.name + (d.is_admin ? ' (Admin)' : '');
+      footer.insertBefore(nameEl, footer.firstChild);
+    }
+  } catch(e) {}
+})();
 loadDashboard();
 loadSettings();
 setInterval(loadDashboard, 15000);
