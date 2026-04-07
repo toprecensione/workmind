@@ -34,6 +34,7 @@ from config.company import get_company_config
 from config.settings import DATA_DIR
 from mindwork.feedback import get_feedback
 from nlp.hallucination_guard import HallucinationGuard
+from mindwork.request_advisor import get_advisor
 from logging_system import get_logger, LogAction, LogStatus
 
 _FACTUAL_KW = (
@@ -67,6 +68,7 @@ class WorkMindWhatsAppBot:
         self._feedback = get_feedback()
         self._audit = get_audit()
         self._guard = HallucinationGuard(self._ai)
+        self._advisor = get_advisor()
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._contacts = self._load_json(_CONTACTS_FILE, {})
@@ -289,11 +291,28 @@ class WorkMindWhatsAppBot:
         text = text.strip()
         from interface.whatsapp_policy import ConsentType
 
+        user_key = f"wa_{phone}"
+
+        # Sessione advisor attiva
+        if self._advisor.has_active_session(user_key):
+            if text.lower() in ("annulla", "stop", "esci", "basta", "no"):
+                self._advisor.cancel(user_key)
+                return "Ok, nessun problema! Scrivimi quando vuoi."
+            resp = self._advisor.process(user_key, text)
+            # Su WhatsApp le risposte arrivano a clienti: rimuove markdown
+            return self._strip_markdown(resp.message)
+
         # Comandi
         if text.startswith("/help"):
             return self._cmd_help(phone)
         if text.startswith("/status"):
             return self._cmd_status()
+        if text.startswith("/idea") or text.startswith("/voglio"):
+            desc = text.split(maxsplit=1)[1].strip() if " " in text else ""
+            if desc:
+                resp = self._advisor.start(user_key, "whatsapp", desc)
+                return self._strip_markdown(resp.message)
+            return "Descrivimi cosa ti serve e ti aiuto a strutturare la richiesta!"
         if text.startswith("/ordine") or text.startswith("/order"):
             return self._cmd_new_order(text, phone)
         if text.startswith("/conferma") or text.startswith("/confirm"):
@@ -313,6 +332,11 @@ class WorkMindWhatsAppBot:
         pending = self._get_pending_order(phone)
         if pending:
             return self._process_order_reply(pending, text, phone)
+
+        # Trigger implicito advisor
+        if self._advisor.is_intent_trigger(text):
+            resp = self._advisor.start(user_key, "whatsapp", text)
+            return self._strip_markdown(resp.message)
 
         # Chat libera con AI
         return self._chat(text, phone)
@@ -644,6 +668,23 @@ class WorkMindWhatsAppBot:
             return response
         except Exception:
             return "Mi scuso, c'e' un problema tecnico. Riprova tra poco."
+
+    # ── Helpers ──────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _strip_markdown(text: str) -> str:
+        """Rimuove la formattazione Markdown per WhatsApp (no bold/italic/heading)."""
+        import re
+        # Rimuovi **bold** e *italic* mantenendo il testo
+        text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+        text = re.sub(r'\*(.+?)\*', r'\1', text)
+        # Rimuovi heading # ## ###
+        text = re.sub(r'^#{1,3}\s+', '', text, flags=re.MULTILINE)
+        # Rimuovi backtick
+        text = re.sub(r'`(.+?)`', r'\1', text)
+        # Rimuovi [testo](url)
+        text = re.sub(r'\[(.+?)\]\(.+?\)', r'\1', text)
+        return text.strip()
 
     # ── Send Messages ────────────────────────────────────────────────────
 

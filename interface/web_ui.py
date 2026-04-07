@@ -32,6 +32,7 @@ from storage.audit_trail import get_audit
 from storage.user_manager import get_user_manager, UserRole
 from mindwork.feedback import get_feedback
 from nlp.hallucination_guard import HallucinationGuard
+from mindwork.request_advisor import get_advisor
 from logging_system import get_logger, LogAction, LogStatus
 
 _FACTUAL_KW = (
@@ -78,6 +79,7 @@ class WorkMindUI:
         self._feedback = get_feedback()
         self._company = get_company_config()
         self._guard = HallucinationGuard(self._ai)
+        self._advisor = get_advisor()
         self._start_time = time.time()
         self._register_routes()
         # Registra route WhatsApp webhook e API
@@ -323,10 +325,41 @@ class WorkMindUI:
             if not message:
                 return jsonify({"reply": "Scrivi un messaggio."})
 
+            # Utente ID per sessione advisor
+            user_id = f"web_{session.get('email', 'anon').replace('@','_')}"
+
+            # Annullamento advisor
+            if message.lower() in ("annulla", "esci", "stop") and self._advisor.has_active_session(user_id):
+                self._advisor.cancel(user_id)
+                return jsonify({"reply": "Ok, lasciamo perdere! Dimmi se hai altre domande.", "source": "advisor"})
+
+            # Sessione advisor attiva: continua raccolta requisiti
+            if self._advisor.has_active_session(user_id):
+                resp = self._advisor.process(user_id, message)
+                return jsonify({
+                    "reply": resp.message,
+                    "source": "advisor",
+                    "phase": resp.phase.value,
+                    "request_submitted": resp.request_submitted,
+                    "request_id": resp.request_id,
+                })
+
             # Comandi slash
             if message.startswith("/"):
+                # /idea e /voglio avviano advisor
+                if any(message.startswith(cmd) for cmd in ("/idea", "/voglio", "/bisogno")):
+                    text = message.split(maxsplit=1)[1].strip() if " " in message else ""
+                    if text:
+                        resp = self._advisor.start(user_id, "web", text)
+                        return jsonify({"reply": resp.message, "source": "advisor", "phase": "clarifying"})
+                    return jsonify({"reply": "Descrivimi cosa ti serve e ti guido!", "source": "advisor"})
                 reply = self._handle_command(message)
                 return jsonify({"reply": reply})
+
+            # Trigger implicito advisor: l'utente esprime un bisogno
+            if self._advisor.is_intent_trigger(message):
+                resp = self._advisor.start(user_id, "web", message)
+                return jsonify({"reply": resp.message, "source": "advisor", "phase": "clarifying"})
 
             # Intent routing: query fattuali → KB first, zero AI
             msg_lower = message.lower()

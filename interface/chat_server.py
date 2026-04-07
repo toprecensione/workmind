@@ -32,6 +32,7 @@ from storage.knowledge_base import get_kb
 from storage.audit_trail import get_audit
 from mindwork.feedback import get_feedback
 from nlp.hallucination_guard import HallucinationGuard
+from mindwork.request_advisor import get_advisor, _INTENT_TRIGGERS
 from logging_system import get_logger, LogAction, LogStatus
 
 # Keyword che indicano domande fattuali su contatti/dati aziendali
@@ -63,6 +64,7 @@ class ChatServer:
         self._feedback = get_feedback()
         self._company = get_company_config()
         self._guard = HallucinationGuard(self._ai)
+        self._advisor = get_advisor()
         self._port = port
         self._history: list[tuple[str, str]] = []
 
@@ -87,7 +89,9 @@ class ChatServer:
             return
 
         def respond(message: str, history: list) -> str:
-            return self._handle_message(message)
+            # Usa l'indice della sessione Gradio come user_id
+            user_id = f"web_{id(history) % 99999}"
+            return self._handle_message(message, user_id=user_id)
 
         demo = gr.ChatInterface(
             fn=respond,
@@ -107,17 +111,42 @@ class ChatServer:
 
     # ── Message handler ───────────────────────────────────────────────────────
 
-    def _handle_message(self, message: str) -> str:
+    def _handle_message(self, message: str, user_id: str = "web_supervisor") -> str:
         message = message.strip()
 
         if not message:
             return "Scrivi un messaggio o usa /help per i comandi."
 
+        # Annullamento sessione advisor attiva
+        if message.lower() in ("annulla", "esci", "stop") and self._advisor.has_active_session(user_id):
+            self._advisor.cancel(user_id)
+            return "Ok, lasciamo perdere. Dimmi pure se hai altre domande!"
+
+        # Sessione advisor attiva: continua raccolta requisiti
+        if self._advisor.has_active_session(user_id):
+            resp = self._advisor.process(user_id, message)
+            return resp.message
+
         # Comandi slash
         if message.startswith("/"):
+            # /idea e /voglio avviano l'advisor esplicitamente
+            if any(message.startswith(cmd) for cmd in ("/idea", "/voglio", "/bisogno")):
+                text = message.split(maxsplit=1)[1] if " " in message else ""
+                if text:
+                    resp = self._advisor.start(user_id, "web", text)
+                    return resp.message
+                return (
+                    "Descrivi pure quello che ti serve, ci penso io a strutturarlo.\n"
+                    "Esempio: `/idea vorrei ricevere un riepilogo giornaliero degli ordini`"
+                )
             return self._handle_command(message)
 
-        # Chat libera con AI
+        # Rileva intenzione implicita di richiedere una feature
+        if self._advisor.is_intent_trigger(message):
+            resp = self._advisor.start(user_id, "web", message)
+            return resp.message
+
+        # Chat normale
         return self._chat(message)
 
     def _handle_command(self, message: str) -> str:
@@ -156,6 +185,7 @@ class ChatServer:
             "| `/correct <errore> → <corretto>` | Correggi una classificazione |\n"
             "| `/process <nome>: <descrizione>` | Insegna un processo |\n"
             "| `/glossary <termine>: <definizione>` | Aggiungi al glossario |\n"
+            "| `/idea <descrizione>` | Chiedi una nuova funzione (guidato) |\n"
             "| `/kb list` | Elenca tutti i fatti in KB |\n"
             "| `/kb search <query>` | Cerca nella KB |\n"
             "| `/kb clear facts` | Cancella tutti i fatti |\n"

@@ -38,6 +38,7 @@ from ai_client.budget import get_budget
 from config.company import get_company_config
 from mindwork.feedback import get_feedback
 from nlp.hallucination_guard import HallucinationGuard
+from mindwork.request_advisor import get_advisor
 from logging_system import get_logger, LogAction, LogStatus
 
 _FACTUAL_KW = (
@@ -60,6 +61,7 @@ class WorkMindTelegramBot:
         self._feedback = get_feedback()
         self._audit = get_audit()
         self._guard = HallucinationGuard(self._ai)
+        self._advisor = get_advisor()
         self._running = False
         self._offset = 0
         self._thread: Optional[threading.Thread] = None
@@ -243,22 +245,32 @@ class WorkMindTelegramBot:
 
     def _handle(self, text: str, chat_id: int = 0) -> str:
         text = text.strip()
+        user_key = f"tg_{chat_id}"
+
+        # Sessione advisor attiva: gestisce la raccolta requisiti
+        if self._advisor.has_active_session(user_key):
+            if text.lower() in ("annulla", "esci", "stop", "basta"):
+                self._advisor.cancel(user_key)
+                return "Ok, lasciamo perdere! Scrivimi quando vuoi."
+            resp = self._advisor.process(user_key, text)
+            return resp.message
+
         if text.startswith("/start"):
             # Auto-subscribe alle notifiche
             notifier = self._get_notifier()
             if notifier and chat_id:
                 notifier.subscribe(chat_id)
             return (
-                f"Ciao! Sono WorkMind, l'assistente operativo di *{self._company.name}*.\n\n"
-                f"*Comandi:*\n"
-                f"/status - Stato bot\n/budget - Spesa AI\n"
-                f"/teach <fatto> - Insegna\n"
-                f"/request <descrizione> - Richiedi funzionalita'\n"
-                f"/requests - Vedi richieste\n"
-                f"/subscribe - Notifiche\n"
-                f"/help - Aiuto\n\n"
-                f"*Master:* /master /approve /reject\n\n"
-                f"Oppure scrivimi una domanda o invia un vocale!"
+                f"Ciao! Sono WorkMind, l'assistente di *{self._company.name}*.\n\n"
+                f"*Comandi principali:*\n"
+                f"/idea <descrizione> - Richiedi una nuova funzione\n"
+                f"/status - Stato del sistema\n"
+                f"/budget - Spesa AI\n"
+                f"/teach <fatto> - Insegna qualcosa\n"
+                f"/kb list - Vedi la knowledge base\n"
+                f"/subscribe - Attiva notifiche\n"
+                f"/help - Tutti i comandi\n\n"
+                f"Oppure scrivimi direttamente cosa ti serve!"
             )
 
         if text.startswith("/subscribe"):
@@ -421,6 +433,17 @@ class WorkMindTelegramBot:
             except Exception as exc:
                 return f"Errore: {exc}"
 
+        # /idea o /voglio: avvia advisor esplicitamente
+        if text.startswith("/idea") or text.startswith("/voglio") or text.startswith("/bisogno"):
+            desc = text.split(maxsplit=1)[1].strip() if " " in text else ""
+            if desc:
+                resp = self._advisor.start(user_key, "telegram", desc)
+                return resp.message
+            return (
+                "Dimmi pure cosa ti serve!\n"
+                "Esempio: /idea vorrei ricevere una notifica quando arriva un nuovo ordine"
+            )
+
         if text.startswith("/kb"):
             arg = text[3:].strip()
             return self._cmd_kb(arg)
@@ -445,6 +468,11 @@ class WorkMindTelegramBot:
                 "/reject <n> [motivo] - Rifiuta richiesta\n\n"
                 "Puoi anche inviare messaggi vocali!"
             )
+
+        # ── Trigger implicito advisor: l'utente esprime un bisogno ──────
+        if self._advisor.is_intent_trigger(text):
+            resp = self._advisor.start(user_key, "telegram", text)
+            return resp.message
 
         # ── Intent routing: KB-first per query fattuali ──────────────────
         msg_lower = text.lower()
