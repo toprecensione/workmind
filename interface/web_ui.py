@@ -497,7 +497,7 @@ class WorkMindUI:
                 response = self._ai.complete(
                     msgs, system_prompt=system,
                     role=ModelRole.RELIABLE, max_tokens=1024, temperature=0.2,
-                )
+                ).text
 
                 # HallucinationGuard
                 guard_issues = []
