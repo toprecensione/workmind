@@ -1322,10 +1322,10 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
   .sidebar { display: none !important; }
   .bottom-nav { display: block; }
   .hide-mobile { display: none !important; }
-  body { overflow: hidden; }
-  .main { overflow: hidden; }
-  /* Tutte le pagine: padding-bottom generoso per non finire sotto la bottom nav */
-  .page { padding: 16px 16px 108px; }
+  /* NON mettere overflow:hidden su body: blocca screenshot su Android */
+  .main { overflow-y: auto; }
+  /* Tutte le pagine: padding-bottom per non finire sotto bottom nav (56px) + margine */
+  .page { padding: 16px 16px 120px; }
   .page-title { font-size: 22px; margin-bottom: 14px; }
   .cards-grid { grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
   .card { padding: 14px; }
@@ -1339,38 +1339,34 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
   .audit-table { font-size: 12px; width: 100%; table-layout: fixed; }
   .audit-table th, .audit-table td { padding: 8px 10px; }
   .audit-table th:first-child, .audit-table td:first-child { width: 115px; }
-  .page-title { padding-top: env(safe-area-inset-top, 0px); }
 
-  /* ── Chat: layout speciale ── */
-  /* La pagina chat non deve scorrere: le msg scorrono dentro il container */
+  /* ── Chat: input fisso sopra la bottom nav (stile WhatsApp/Telegram) ── */
   #page-chat {
-    padding: 16px 16px 0;   /* no bottom padding: gestiamo noi */
-    overflow: hidden;
-    flex: 1;
-    min-height: 0;
+    padding: 16px 16px 0;
   }
-  /* Container = tutto lo spazio dopo il titolo */
   .chat-container {
-    flex: 1;
-    min-height: 0;
     max-height: none !important;
-    overflow: hidden;
     display: flex;
     flex-direction: column;
   }
-  /* Messaggi: scorrono verticalmente */
+  /* Messaggi: scrollano, spazio in basso per input fisso + bottom nav */
   .chat-messages {
-    flex: 1;
-    min-height: 0;
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
+    padding-bottom: 130px;  /* input ~66px + bottom-nav 56px + margine */
+    max-height: none;
+    flex: 1;
   }
-  /* Input: resta in fondo, con padding-bottom che supera la bottom nav */
+  /* Input fisso in basso, esattamente sopra la bottom nav */
   .chat-input-row {
-    flex-shrink: 0;
-    padding: 10px 0 72px;  /* 72px > 56px bottom-nav: l'input è sopra */
+    position: fixed;
+    bottom: 56px;           /* altezza bottom nav */
+    left: 0; right: 0;
+    padding: 10px 16px 12px;
     background: var(--bg);
     border-top: 1px solid var(--border);
+    z-index: 150;
+    box-shadow: 0 -4px 12px rgba(0,0,0,0.06);
   }
 }
 </style>
