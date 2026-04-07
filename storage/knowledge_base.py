@@ -160,6 +160,66 @@ class KnowledgeBase:
 
         return "\n".join(parts)
 
+    def lookup_fact(self, query: str, threshold: float = 0.3) -> Optional[str]:
+        """
+        Cerca nella KB un fatto pertinente alla query (matching keyword semplice).
+        Ritorna il testo del fatto più rilevante, o None se non trovato.
+
+        Non usa embeddings — usa overlap di parole chiave normalizzate.
+        Sufficiente per query dirette su contatti, URL, email, numeri.
+        """
+        query_words = set(
+            w.lower().strip(".,!?;:")
+            for w in query.split()
+            if len(w) > 2
+        )
+        if not query_words:
+            return None
+
+        best_score = 0.0
+        best_fact: Optional[str] = None
+
+        # Cerca nei fatti
+        for entry in self.get_facts():
+            text = entry.get("text", "")
+            fact_words = set(
+                w.lower().strip(".,!?;:")
+                for w in text.split()
+                if len(w) > 2
+            )
+            if not fact_words:
+                continue
+            overlap = len(query_words & fact_words) / max(len(query_words), 1)
+            if overlap > best_score:
+                best_score = overlap
+                best_fact = text
+
+        # Cerca nei processi
+        for proc in self.get_processes():
+            text = f"{proc.get('name', '')} {proc.get('description', '')}"
+            proc_words = set(
+                w.lower().strip(".,!?;:")
+                for w in text.split()
+                if len(w) > 2
+            )
+            if not proc_words:
+                continue
+            overlap = len(query_words & proc_words) / max(len(query_words), 1)
+            if overlap > best_score:
+                best_score = overlap
+                steps = proc.get("steps", [])
+                best_fact = (
+                    f"{proc['name']}: {proc['description']}"
+                    + (("\n" + "\n".join(f"{i+1}. {s}" for i, s in enumerate(steps))) if steps else "")
+                )
+
+        # Cerca nel glossario
+        for term, definition in self.get_glossary().items():
+            if term.lower() in query.lower():
+                return f"{term}: {definition}"
+
+        return best_fact if best_score >= threshold else None
+
     def summary(self) -> dict:
         return {
             "facts": len(self.get_facts()),

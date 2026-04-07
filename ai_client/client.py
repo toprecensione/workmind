@@ -31,10 +31,14 @@ log = get_logger("ai_client.client")
 # ─── Model Role (quale modello usare per il task) ────────────────────────────
 
 class ModelRole(str, Enum):
-    FAST       = "fast"        # DeepSeek: classificazione, entità, riassunti (80% dei task)
-    ANALYSE    = "analyse"     # Claude Sonnet: analisi complessa, report, validazione (15%)
-    CHAT       = "chat"        # Claude Sonnet: chat supervisore, strategia (5%)
+    FAST       = "fast"        # DeepSeek: classificazione, entità, riassunti interni (70%)
+    RELIABLE   = "reliable"    # Claude Haiku: risposte customer-facing, fatti (20%)
+    ANALYSE    = "analyse"     # Claude Sonnet: analisi complessa, report (8%)
+    CHAT       = "chat"        # Claude Sonnet: chat supervisore, strategia (2%)
     VISION     = "vision"      # Claude Vision: OCR schermate RDP
+
+    # Alias semantico: query che richiedono affidabilità fattuale → Haiku
+    GROUND     = "reliable"    # = RELIABLE (usa KB + Haiku, mai DeepSeek)
 
 
 # ─── Strutture dati ──────────────────────────────────────────────────────────
@@ -63,8 +67,13 @@ _DEEPSEEK_BASE  = "https://api.deepseek.com"
 _DEEPSEEK_MODEL = "deepseek-chat"
 
 _CLAUDE_BASE    = "https://api.anthropic.com"
-_CLAUDE_MODEL   = "claude-sonnet-4-6"
 _CLAUDE_VERSION = "2023-06-01"
+
+# Modelli Claude per tier di costo/qualità
+# Haiku:  $0.80/MTok input,  $4/MTok output  → affidabile, economico
+# Sonnet: $3.00/MTok input, $15/MTok output  → analisi complessa
+_CLAUDE_HAIKU   = "claude-haiku-4-5"    # tier 1: affidabile, economico
+_CLAUDE_SONNET  = "claude-sonnet-4-6"   # tier 2: analisi/chat avanzata
 
 _MAX_RETRIES    = 3
 _RETRY_BASE_S   = 2.0     # secondi base per backoff
@@ -105,7 +114,7 @@ class AIClient:
         Invia i messaggi al modello appropriato.
         In caso di errore o budget esaurito tenta il provider alternativo.
         """
-        primary, fallback = self._route(role)
+        primary, fallback, claude_model = self._route(role)
 
         for provider in [primary, fallback]:
             if not provider:
@@ -118,7 +127,8 @@ class AIClient:
                 continue
             try:
                 response = self._call_with_retry(
-                    provider, messages, system_prompt, max_tokens, temperature
+                    provider, messages, system_prompt, max_tokens, temperature,
+                    claude_model=claude_model,
                 )
                 self._budget.record_usage(
                     provider,
@@ -164,11 +174,24 @@ class AIClient:
 
     # ── Routing ───────────────────────────────────────────────────────────────
 
-    def _route(self, role: ModelRole) -> tuple[str, str]:
-        """Ritorna (provider_primario, provider_fallback)."""
-        if role in (ModelRole.FAST,):
-            return ("deepseek", "claude")
-        return ("claude", "deepseek")
+    def _route(self, role: ModelRole) -> tuple[str, str, str]:
+        """
+        Ritorna (provider_primario, provider_fallback, modello_claude).
+
+        Routing per costo/affidabilità:
+          FAST     → DeepSeek (cheap) → fallback Claude Haiku
+          RELIABLE → Claude Haiku     → fallback DeepSeek
+          ANALYSE  → Claude Sonnet    → fallback DeepSeek
+          CHAT     → Claude Sonnet    → fallback Claude Haiku
+          VISION   → Claude Sonnet    (vision)
+        """
+        if role == ModelRole.FAST:
+            return ("deepseek", "claude", _CLAUDE_HAIKU)
+        if role == ModelRole.RELIABLE:       # alias GROUND
+            return ("claude", "deepseek", _CLAUDE_HAIKU)
+        if role in (ModelRole.ANALYSE, ModelRole.CHAT, ModelRole.VISION):
+            return ("claude", "deepseek", _CLAUDE_SONNET)
+        return ("claude", "deepseek", _CLAUDE_SONNET)
 
     # ── Retry wrapper ─────────────────────────────────────────────────────────
 
@@ -180,6 +203,7 @@ class AIClient:
         max_tokens: int,
         temperature: float,
         image_b64: Optional[str] = None,
+        claude_model: str = _CLAUDE_SONNET,
     ) -> AIResponse:
         last_exc: Exception = RuntimeError("No attempts made")
         for attempt in range(_MAX_RETRIES):
@@ -187,7 +211,8 @@ class AIClient:
                 if provider == "deepseek":
                     return self._call_deepseek(messages, system_prompt, max_tokens, temperature)
                 elif provider == "claude":
-                    return self._call_claude(messages, system_prompt, max_tokens, temperature, image_b64)
+                    return self._call_claude(messages, system_prompt, max_tokens, temperature,
+                                             image_b64, model=claude_model)
                 else:
                     raise ValueError(f"Provider sconosciuto: {provider}")
             except httpx.TimeoutException as exc:
@@ -258,6 +283,7 @@ class AIClient:
         max_tokens: int,
         temperature: float,
         image_b64: Optional[str] = None,
+        model: str = _CLAUDE_SONNET,
     ) -> AIResponse:
         if not self._claude_key:
             raise RuntimeError("ANTHROPIC_API_KEY non configurata")
@@ -281,7 +307,7 @@ class AIClient:
             payload_messages.append({"role": m.role, "content": content})
 
         body: dict = {
-            "model": _CLAUDE_MODEL,
+            "model": model,
             "max_tokens": max_tokens,
             "temperature": temperature,
             "messages": payload_messages,

@@ -31,7 +31,21 @@ from config.company import get_company_config
 from storage.knowledge_base import get_kb
 from storage.audit_trail import get_audit
 from mindwork.feedback import get_feedback
+from nlp.hallucination_guard import HallucinationGuard
 from logging_system import get_logger, LogAction, LogStatus
+
+# Keyword che indicano domande fattuali su contatti/dati aziendali
+_FACTUAL_KEYWORDS = (
+    "contatt", "telefono", "email", "mail", "indirizzo", "sito",
+    "website", "url", "numero", "orari", "sede", "p.iva", "partita iva",
+    "codice fiscale", "pec", "dove siete", "dove si trova",
+)
+
+# Keyword che indicano domande interne di analisi/processo
+_ANALYSIS_KEYWORDS = (
+    "analizza", "report", "riepilog", "riassumi", "classifica",
+    "estrai", "trova", "cerca", "quant", "statistic", "trend",
+)
 
 log = get_logger("interface.chat")
 
@@ -48,6 +62,7 @@ class ChatServer:
         self._budget = get_budget()
         self._feedback = get_feedback()
         self._company = get_company_config()
+        self._guard = HallucinationGuard(self._ai)
         self._port = port
         self._history: list[tuple[str, str]] = []
 
@@ -251,26 +266,118 @@ class ChatServer:
             )
         return "\n".join(lines)
 
+    # ── Intent detection ──────────────────────────────────────────────────────
+
+    def _detect_intent(self, message: str) -> str:
+        """
+        Classifica il tipo di query senza chiamare l'AI.
+        Ritorna: "factual" | "analysis" | "chat"
+        """
+        msg_lower = message.lower()
+        if any(kw in msg_lower for kw in _FACTUAL_KEYWORDS):
+            return "factual"
+        if any(kw in msg_lower for kw in _ANALYSIS_KEYWORDS):
+            return "analysis"
+        return "chat"
+
     # ── Chat libera ───────────────────────────────────────────────────────────
 
     def _chat(self, message: str) -> str:
-        """Chat libera: il supervisore fa domande, il bot risponde con contesto aziendale."""
+        """
+        Chat libera con routing intelligente per tipo di query:
+        - factual  → Knowledge Base first, AI solo se non trovato
+        - analysis → DeepSeek FAST + HallucinationGuard
+        - chat     → Claude Haiku con system prompt blindato
+        """
+        intent = self._detect_intent(message)
+
+        # ── 1. Query fattuale: vai prima in KB ───────────────────────────────
+        if intent == "factual":
+            kb_answer = self._kb.lookup_fact(message)
+            if kb_answer:
+                log.info(
+                    "Risposta da KB (no AI call)",
+                    action=LogAction.QUERY, status=LogStatus.OK,
+                    extra={"intent": "factual", "kb_hit": True},
+                )
+                return f"{kb_answer}\n\n*[Fonte: Knowledge Base aziendale]*"
+            # Non trovato in KB — rispondi onestamente senza inventare
+            return (
+                "Non ho questa informazione nella Knowledge Base aziendale.\n"
+                "Puoi aggiungerla con `/teach <fatto>` — esempio:\n"
+                "`/teach Il nostro sito è https://faberweb.it`\n"
+                "`/teach Email contatti: info@faberweb.it`"
+            )
+
+        # ── 2. Query di analisi: DeepSeek + guard ────────────────────────────
+        if intent == "analysis":
+            return self._chat_with_guard(
+                message,
+                role=ModelRole.FAST,
+                source_text=self._kb.build_context_prompt() or message,
+            )
+
+        # ── 3. Chat libera: Claude Haiku con system prompt blindato ──────────
+        return self._chat_with_guard(
+            message,
+            role=ModelRole.CHAT,
+            source_text="",
+        )
+
+    def _chat_with_guard(
+        self,
+        message: str,
+        role: ModelRole,
+        source_text: str,
+    ) -> str:
+        """Chiama l'AI e passa l'output attraverso HallucinationGuard."""
         context = self._kb.build_context_prompt()
+
+        # ── System prompt blindato anti-allucinazione ─────────────────────
         system_prompt = (
             f"Sei WorkMind, l'assistente operativo di {self._company.name} "
             f"(settore: {self._company.sector}). "
-            f"Rispondi in modo conciso e actionable in italiano.\n"
+            f"Rispondi in italiano in modo conciso e actionable.\n\n"
+            f"REGOLE FONDAMENTALI — rispetta sempre:\n"
+            f"1. NON inventare URL, email, numeri di telefono, indirizzi o dati di contatto.\n"
+            f"2. Se non hai un'informazione con certezza, rispondi: "
+            f"\"Non ho questa informazione. Aggiungila con /teach.\"\n"
+            f"3. Usa SOLO fatti presenti nella Knowledge Base qui sotto o nel testo originale.\n"
+            f"4. Non completare con dati plausibili ma non verificati.\n"
+            f"5. Il dominio di WorkMind NON è workmind.dev — non esiste un sito pubblico.\n"
         )
         if context:
-            system_prompt += f"\n{context}\n"
+            system_prompt += f"\n--- KNOWLEDGE BASE AZIENDALE ---\n{context}\n---\n"
 
         try:
             response = self._ai.complete_simple(
                 message,
                 system_prompt=system_prompt,
-                role=ModelRole.CHAT,
+                role=role,
                 max_tokens=512,
+                temperature=0.2,   # più bassa = meno "creatività" = meno allucinazioni
             )
+
+            # ── Passa per HallucinationGuard ──────────────────────────────
+            if source_text:
+                result = self._guard.validate(response, source_text, context=message)
+                if not result.is_valid:
+                    warning = (
+                        f"\n\n⚠️ *Attenzione: ho rilevato {len(result.issues)} possibili "
+                        f"imprecisioni in questa risposta. Verifica prima di usarla.*"
+                    )
+                    log.warning(
+                        "HallucinationGuard: problemi rilevati in chat",
+                        action=LogAction.VALIDATE, status=LogStatus.WARNING,
+                        extra={"issues": result.issues[:3]},
+                    )
+                    return response + warning
+
             return response
+
         except Exception as exc:
+            log.error(
+                f"Errore chat: {exc}",
+                action=LogAction.QUERY, status=LogStatus.ERROR,
+            )
             return f"Errore AI: {exc}"
