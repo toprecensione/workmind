@@ -1321,24 +1321,43 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
 @media (max-width: 768px) {
   .sidebar { display: none !important; }
   .bottom-nav { display: block; }
+  .hide-mobile { display: none !important; }
   body { overflow: hidden; }
   .main { overflow: hidden; }
-  .page { padding: 16px 16px 72px; }
+  .page { padding: 16px 16px 84px; }
   .page-title { font-size: 22px; margin-bottom: 14px; }
   .cards-grid { grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
   .card { padding: 14px; }
   .card-value { font-size: 24px; }
   .card-sub { font-size: 12px; }
-  .chat-container { max-height: calc(100vh - 124px); }
   .chat-messages { gap: 8px; }
   .msg { max-width: 90%; font-size: 14px; }
-  .chat-input-row { padding: 10px 0; }
   .settings-section { padding: 16px; margin-bottom: 12px; }
   .form-row { grid-template-columns: 1fr; }
   .form-group.full { grid-column: span 1; }
-  .audit-table { font-size: 11px; }
-  .audit-table th, .audit-table td { padding: 6px 8px; }
+  .audit-table { font-size: 12px; width: 100%; table-layout: fixed; }
+  .audit-table th, .audit-table td { padding: 8px 10px; }
+  .audit-table th:first-child, .audit-table td:first-child { width: 115px; }
   .page-title { padding-top: env(safe-area-inset-top, 0px); }
+
+  /* Chat: altezza esatta, input sopra la bottom nav */
+  #page-chat {
+    padding-bottom: 0 !important;
+    height: calc(100dvh - 56px);
+    height: calc(100vh - 56px);
+    overflow: hidden;
+  }
+  .chat-container {
+    flex: 1; min-height: 0; max-height: none !important; overflow: hidden;
+  }
+  .chat-messages {
+    flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  }
+  .chat-input-row {
+    flex-shrink: 0; padding: 10px 0 14px;
+    border-top: 1px solid var(--border);
+    background: var(--bg);
+  }
 }
 </style>
 </head>
@@ -1434,7 +1453,7 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
     <div class="page-title">Audit Trail</div>
     <div class="settings-section">
       <table class="audit-table">
-        <thead><tr><th>Quando</th><th>Tipo</th><th>Attore</th><th>Dettaglio</th></tr></thead>
+        <thead><tr><th>Quando</th><th>Tipo</th><th class="hide-mobile">Attore</th><th class="hide-mobile">Dettaglio</th></tr></thead>
         <tbody id="audit-tbody"></tbody>
       </table>
     </div>
@@ -1917,14 +1936,16 @@ async function loadDashboard() {
 // ── Audit ─────────────────────────────────────────────────────
 async function loadAudit() {
   const data = await fetch('/api/audit').then(r=>r.json());
-  document.getElementById('audit-tbody').innerHTML = (data||[]).map(e =>
-    `<tr>
-      <td>${(e.timestamp||'').replace('T',' ').slice(0,16)}</td>
-      <td><span class="badge badge-blue">${e.event_type||''}</span></td>
-      <td>${e.actor||''}</td>
-      <td>${e.summary||''}</td>
-    </tr>`
-  ).join('') || '<tr><td colspan=4 style="text-align:center;color:var(--text2)">Nessun evento</td></tr>';
+  document.getElementById('audit-tbody').innerHTML = (data||[]).map(e => {
+    const ts = (e.timestamp||'').replace('T',' ').slice(0,16);
+    const evType = (e.event_type||'').replace('AuditEventType.','');
+    return `<tr>
+      <td style="white-space:nowrap">${ts}</td>
+      <td><span class="badge badge-blue">${evType}</span></td>
+      <td class="hide-mobile">${e.actor||''}</td>
+      <td class="hide-mobile" style="max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${e.summary||''}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan=4 style="text-align:center;color:var(--text2)">Nessun evento</td></tr>';
 }
 
 // ── Chat ─────────────────────────────────────────────────────
