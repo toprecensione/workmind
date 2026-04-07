@@ -1,0 +1,13 @@
+{
+  "id": "whatsapp",
+  "name": "WhatsApp Business",
+  "version": "1.0.0",
+  "description": "Comunicazione con clienti via WhatsApp Business Cloud API. Gestione ordini, consenso GDPR, rate limiting.",
+  "author": "WorkMind Dev",
+  "workmind_min_version": "1.0.0",
+  "category": "interface",
+  "hooks": ["web_routes", "startup"],
+  "requires": ["httpx"],
+  "config_keys": ["WHATSAPP_TOKEN", "WHATSAPP_PHONE_ID", "WHATSAPP_VERIFY_TOKEN"],
+  "enabled_by_default": false
+}

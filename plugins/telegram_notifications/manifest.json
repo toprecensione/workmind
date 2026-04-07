@@ -1,0 +1,13 @@
+{
+  "id": "telegram_notifications",
+  "name": "Telegram Notifications",
+  "version": "1.0.0",
+  "description": "Notifiche proattive via Telegram: anomalie, riepilogo giornaliero, gestione iscrizioni.",
+  "author": "WorkMind Dev",
+  "workmind_min_version": "1.0.0",
+  "category": "interface",
+  "hooks": ["startup"],
+  "requires": ["httpx"],
+  "config_keys": ["TELEGRAM_BOT_TOKEN"],
+  "enabled_by_default": true
+}

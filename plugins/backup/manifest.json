@@ -1,0 +1,13 @@
+{
+  "id": "backup",
+  "name": "Automatic Backup",
+  "version": "1.0.0",
+  "description": "Backup automatico ogni 24h con retention 30 copie. Archivi tar.gz di KB, audit, settings, chromadb.",
+  "author": "WorkMind Dev",
+  "workmind_min_version": "1.0.0",
+  "category": "storage",
+  "hooks": ["startup"],
+  "requires": [],
+  "config_keys": [],
+  "enabled_by_default": true
+}

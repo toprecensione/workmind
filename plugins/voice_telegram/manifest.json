@@ -1,0 +1,13 @@
+{
+  "id": "voice_telegram",
+  "name": "Voice Messages (Telegram)",
+  "version": "1.0.0",
+  "description": "Trascrizione messaggi vocali Telegram via Google STT. Richiede ffmpeg e SpeechRecognition.",
+  "author": "WorkMind Dev",
+  "workmind_min_version": "1.0.0",
+  "category": "interface",
+  "hooks": ["telegram_commands"],
+  "requires": ["SpeechRecognition", "pydub"],
+  "config_keys": [],
+  "enabled_by_default": true
+}

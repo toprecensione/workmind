@@ -1,0 +1,13 @@
+{
+  "id": "feature_requests",
+  "name": "Feature Request Pipeline",
+  "version": "1.0.0",
+  "description": "Pipeline richieste funzionalita': classificazione AI (AUTO/REVIEW/BLOCK), GitHub Issues, approvazione master",
+  "author": "WorkMind Dev",
+  "workmind_min_version": "1.0.0",
+  "category": "interface",
+  "hooks": ["web_routes", "telegram_commands"],
+  "requires": [],
+  "config_keys": ["GITHUB_TOKEN"],
+  "enabled_by_default": true
+}
