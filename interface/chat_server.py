@@ -131,6 +131,7 @@ class ChatServer:
             "/correct":     self._cmd_correct,
             "/process":     self._cmd_process,
             "/glossary":    self._cmd_glossary,
+            "/kb":          self._cmd_kb,
             "/status":      self._cmd_status,
             "/report":      self._cmd_report,
             "/suggestions": self._cmd_suggestions,
@@ -155,13 +156,94 @@ class ChatServer:
             "| `/correct <errore> → <corretto>` | Correggi una classificazione |\n"
             "| `/process <nome>: <descrizione>` | Insegna un processo |\n"
             "| `/glossary <termine>: <definizione>` | Aggiungi al glossario |\n"
+            "| `/kb list` | Elenca tutti i fatti in KB |\n"
+            "| `/kb search <query>` | Cerca nella KB |\n"
+            "| `/kb clear facts` | Cancella tutti i fatti |\n"
+            "| `/kb export` | Esporta KB come testo |\n"
             "| `/status` | Stato del bot |\n"
             "| `/report` | Genera report on-demand |\n"
             "| `/suggestions` | Suggerimenti recenti |\n"
             "| `/feedback <id> <confirm/correct/reject> [nota]` | Feedback |\n"
-            "| `/budget` | Spesa AI giornaliera |\n"
+            "| `/budget` | Spesa AI per modello |\n"
             "| `/audit` | Ultimi eventi audit |\n"
         )
+
+    def _cmd_kb(self, arg: str) -> str:
+        """Gestione Knowledge Base: list / search / clear / export."""
+        parts = arg.strip().split(maxsplit=1)
+        subcmd = parts[0].lower() if parts else "list"
+        subarg = parts[1] if len(parts) > 1 else ""
+
+        if subcmd == "list":
+            facts = self._kb.get_facts()
+            procs = self._kb.get_processes()
+            gloss = self._kb.get_glossary()
+            if not facts and not procs and not gloss:
+                return (
+                    "**Knowledge Base vuota.**\n\n"
+                    "Aggiungi fatti con `/teach <fatto>`\n"
+                    "Esempio: `/teach Email contatti: info@faberweb.it`"
+                )
+            lines = [f"**Knowledge Base — {len(facts)} fatti, "
+                     f"{len(procs)} processi, {len(gloss)} termini**\n"]
+            if facts:
+                lines.append("**Fatti:**")
+                for i, f in enumerate(facts[-20:], 1):
+                    lines.append(f"  {i}. {f['text']}")
+            if procs:
+                lines.append("\n**Processi:**")
+                for p in procs:
+                    lines.append(f"  • **{p['name']}**: {p['description'][:80]}")
+            if gloss:
+                lines.append("\n**Glossario:**")
+                for term, defn in list(gloss.items())[:15]:
+                    lines.append(f"  • **{term}**: {defn}")
+            return "\n".join(lines)
+
+        elif subcmd == "search":
+            if not subarg:
+                return "Uso: `/kb search <query>`"
+            result = self._kb.lookup_fact(subarg, threshold=0.15)
+            if result:
+                return f"**Trovato in KB:**\n{result}"
+            # Ricerca testuale diretta
+            query_lower = subarg.lower()
+            matches = []
+            for f in self._kb.get_facts():
+                if query_lower in f["text"].lower():
+                    matches.append(f["text"])
+            if matches:
+                return "**Corrispondenze:**\n" + "\n".join(f"• {m}" for m in matches[:10])
+            return f"Nessun risultato in KB per: *{subarg}*"
+
+        elif subcmd == "clear":
+            if subarg == "facts":
+                count = len(self._kb.get_facts())
+                self._kb._data["facts"] = []
+                self._kb._save()
+                log.warning("KB facts cancellati via chat",
+                            action=LogAction.CONFIG, status=LogStatus.WARNING)
+                return f"Cancellati {count} fatti dalla KB."
+            elif subarg == "all":
+                self._kb._data = {"facts": [], "corrections": [], "processes": [], "glossary": {}}
+                self._kb._save()
+                return "Knowledge Base completamente svuotata."
+            else:
+                return "Uso: `/kb clear facts` oppure `/kb clear all`"
+
+        elif subcmd == "export":
+            context = self._kb.build_context_prompt()
+            if not context:
+                return "KB vuota — nulla da esportare."
+            summary = self._kb.summary()
+            header = (f"# WorkMind Knowledge Base Export\n"
+                      f"Fatti: {summary['facts']} | "
+                      f"Processi: {summary['processes']} | "
+                      f"Glossario: {summary['glossary_terms']}\n\n")
+            return header + context
+
+        else:
+            return "Sottocomandi: `list` | `search <query>` | `clear facts` | `export`"
 
     def _cmd_teach(self, arg: str) -> str:
         if not arg:

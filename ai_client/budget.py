@@ -3,9 +3,11 @@ WorkMind Budget Manager
 CONFIDENTIAL - PRIVATE REPOSITORY - NOT FOR PUBLIC DISTRIBUTION
 
 Monitora e limita la spesa giornaliera per provider AI.
-Prezzi approssimati (aggiornare se cambiano):
-  DeepSeek: ~$0.14/M input token, ~$0.28/M output token
-  Claude Sonnet 4.x: ~$3/M input, ~$15/M output
+Prezzi aggiornati (aprile 2026):
+  DeepSeek Chat:      $0.07/M input,  $1.10/M output
+  Claude Haiku 3.5:  $0.80/M input,  $4.00/M output  ← nuovo tier affidabile
+  Claude Sonnet 4.x: $3.00/M input, $15.00/M output
+  Claude Opus 4.x:  $15.00/M input, $75.00/M output  (non usato di default)
 """
 
 from __future__ import annotations
@@ -21,10 +23,24 @@ from logging_system import get_logger, LogStatus, LogAction
 
 log = get_logger("ai_client.budget")
 
-# Prezzi per 1M token (USD)
+# Prezzi per 1M token (USD) — per modello
+_MODEL_PRICES: dict[str, dict[str, float]] = {
+    # DeepSeek
+    "deepseek-chat":            {"input": 0.07,  "output": 1.10},
+    # Claude Haiku (economico, affidabile)
+    "claude-haiku-4-5":         {"input": 0.80,  "output": 4.00},
+    "claude-haiku-3-5":         {"input": 0.80,  "output": 4.00},
+    # Claude Sonnet (analisi complessa)
+    "claude-sonnet-4-6":        {"input": 3.00,  "output": 15.00},
+    "claude-sonnet-3-7":        {"input": 3.00,  "output": 15.00},
+    # Claude Opus (non usato di default)
+    "claude-opus-4":            {"input": 15.00, "output": 75.00},
+}
+
+# Prezzi di fallback per provider (se modello non riconosciuto)
 _PRICE_TABLE: dict[str, dict[str, float]] = {
-    "deepseek": {"input": 0.14, "output": 0.28},
-    "claude":   {"input": 3.00, "output": 15.00},
+    "deepseek": {"input": 0.07,  "output": 1.10},
+    "claude":   {"input": 3.00,  "output": 15.00},   # Sonnet come default
 }
 
 _BUDGET_FILE = DATA_DIR / "budget_usage.json"
@@ -60,7 +76,11 @@ class BudgetManager:
         model: str = "",
     ) -> float:
         """Registra l'uso di token e ritorna il costo in USD."""
-        price = _PRICE_TABLE.get(provider, {"input": 0.0, "output": 0.0})
+        # Prova a usare il prezzo specifico del modello, poi fallback provider
+        if model and model in _MODEL_PRICES:
+            price = _MODEL_PRICES[model]
+        else:
+            price = _PRICE_TABLE.get(provider, {"input": 0.0, "output": 0.0})
         cost = (input_tokens * price["input"] + output_tokens * price["output"]) / 1_000_000
 
         today = date.today().isoformat()
@@ -70,6 +90,15 @@ class BudgetManager:
             self._data[provider][today]["output_tokens"] += output_tokens
             self._data[provider][today]["cost_usd"]      += cost
             self._data[provider][today]["calls"]         += 1
+            # Tracking per modello
+            if model:
+                mb = self._data[provider][today].setdefault("model_breakdown", {})
+                mb.setdefault(model, {"calls": 0, "input_tokens": 0,
+                                      "output_tokens": 0, "cost_usd": 0.0})
+                mb[model]["calls"]         += 1
+                mb[model]["input_tokens"]  += input_tokens
+                mb[model]["output_tokens"] += output_tokens
+                mb[model]["cost_usd"]      += cost
             self._save()
 
         limit = self._get_daily_limit(provider)
@@ -88,14 +117,28 @@ class BudgetManager:
         summary = {}
         for provider in _PRICE_TABLE:
             d = self._data.get(provider, {}).get(today, {})
+            cost = round(d.get("cost_usd", 0.0), 4)
+            limit = self._get_daily_limit(provider)
             summary[provider] = {
                 "calls":         d.get("calls", 0),
                 "input_tokens":  d.get("input_tokens", 0),
                 "output_tokens": d.get("output_tokens", 0),
-                "cost_usd":      round(d.get("cost_usd", 0.0), 4),
-                "limit_usd":     self._get_daily_limit(provider),
+                "cost_usd":      cost,
+                "limit_usd":     limit,
+                "percent":       round(cost / limit * 100, 1) if limit > 0 else 0,
+                "model_breakdown": d.get("model_breakdown", {}),
             }
         return summary
+
+    def model_breakdown_today(self) -> dict[str, dict]:
+        """Spesa odierna suddivisa per singolo modello."""
+        today = date.today().isoformat()
+        result: dict[str, dict] = {}
+        for provider in _PRICE_TABLE:
+            breakdown = self._data.get(provider, {}).get(today, {}).get("model_breakdown", {})
+            for model, stats in breakdown.items():
+                result[model] = {**stats, "provider": provider}
+        return result
 
     # ── Internal ──────────────────────────────────────────────────────────────
 

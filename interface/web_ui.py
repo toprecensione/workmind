@@ -31,7 +31,13 @@ from storage.knowledge_base import get_kb
 from storage.audit_trail import get_audit
 from storage.user_manager import get_user_manager, UserRole
 from mindwork.feedback import get_feedback
+from nlp.hallucination_guard import HallucinationGuard
 from logging_system import get_logger, LogAction, LogStatus
+
+_FACTUAL_KW = (
+    "contatt", "telefono", "email", "mail", "indirizzo", "sito",
+    "website", "url", "numero", "orari", "sede", "dove",
+)
 
 log = get_logger("interface.web_ui")
 
@@ -71,6 +77,7 @@ class WorkMindUI:
         self._audit = get_audit()
         self._feedback = get_feedback()
         self._company = get_company_config()
+        self._guard = HallucinationGuard(self._ai)
         self._start_time = time.time()
         self._register_routes()
         # Registra route WhatsApp webhook e API
@@ -210,6 +217,103 @@ class WorkMindUI:
         def api_kb():
             return jsonify(self._kb.summary())
 
+        @app.route("/api/kb/full")
+        @_require_auth
+        def api_kb_full():
+            """Restituisce tutti i contenuti della KB."""
+            return jsonify({
+                "facts":       self._kb.get_facts(),
+                "corrections": self._kb.get_corrections(),
+                "processes":   self._kb.get_processes(),
+                "glossary":    self._kb.get_glossary(),
+                "summary":     self._kb.summary(),
+            })
+
+        @app.route("/api/kb/search")
+        @_require_auth
+        def api_kb_search():
+            q = request.args.get("q", "").strip()
+            if not q:
+                return jsonify({"result": None, "matches": []})
+            result = self._kb.lookup_fact(q, threshold=0.15)
+            # Ricerca testuale diretta
+            matches = [f["text"] for f in self._kb.get_facts()
+                       if q.lower() in f["text"].lower()]
+            return jsonify({"result": result, "matches": matches[:20]})
+
+        @app.route("/api/kb/fact", methods=["POST"])
+        @_require_auth
+        def api_kb_add_fact():
+            d = request.get_json() or {}
+            text = d.get("text", "").strip()
+            if not text:
+                return jsonify({"ok": False, "error": "Testo vuoto"})
+            self._kb.teach_fact(text, taught_by=session.get("email", "web"))
+            try:
+                from storage.vector_store import get_vector_store
+                get_vector_store().index_fact(text, source="web_kb")
+            except Exception:
+                pass
+            return jsonify({"ok": True, "text": text})
+
+        @app.route("/api/kb/fact/<int:idx>", methods=["DELETE"])
+        @_require_auth
+        def api_kb_delete_fact(idx):
+            facts = self._kb.get_facts()
+            if idx < 0 or idx >= len(facts):
+                return jsonify({"ok": False, "error": "Indice non valido"})
+            removed = facts.pop(idx)
+            self._kb._data["facts"] = facts
+            self._kb._save()
+            return jsonify({"ok": True, "removed": removed["text"]})
+
+        @app.route("/api/kb/glossary", methods=["POST"])
+        @_require_auth
+        def api_kb_add_glossary():
+            d = request.get_json() or {}
+            term = d.get("term", "").strip()
+            defn = d.get("definition", "").strip()
+            if not term or not defn:
+                return jsonify({"ok": False, "error": "Termine e definizione richiesti"})
+            self._kb.add_glossary_term(term, defn)
+            return jsonify({"ok": True})
+
+        @app.route("/api/kb/glossary/<term>", methods=["DELETE"])
+        @_require_auth
+        def api_kb_delete_glossary(term):
+            gloss = self._kb.get_glossary()
+            if term.lower() not in gloss:
+                return jsonify({"ok": False, "error": "Termine non trovato"})
+            del self._kb._data["glossary"][term.lower()]
+            self._kb._save()
+            return jsonify({"ok": True})
+
+        @app.route("/api/kb/process", methods=["POST"])
+        @_require_auth
+        def api_kb_add_process():
+            d = request.get_json() or {}
+            name = d.get("name", "").strip()
+            desc = d.get("description", "").strip()
+            steps = d.get("steps", [])
+            if not name or not desc:
+                return jsonify({"ok": False, "error": "Nome e descrizione richiesti"})
+            self._kb.teach_process(name, desc, steps,
+                                   taught_by=session.get("email", "web"))
+            return jsonify({"ok": True})
+
+        @app.route("/api/kb/export")
+        @_require_auth
+        def api_kb_export():
+            ctx = self._kb.build_context_prompt()
+            summary = self._kb.summary()
+            return jsonify({"export": ctx, "summary": summary})
+
+        @app.route("/api/budget/models")
+        @_require_auth
+        def api_budget_models():
+            """Spesa odierna per singolo modello AI."""
+            return jsonify(self._budget.model_breakdown_today())
+
         # ── API: Chat ─────────────────────────────────────────────────────
         @app.route("/api/chat", methods=["POST"])
         @_require_auth
@@ -219,15 +323,33 @@ class WorkMindUI:
             if not message:
                 return jsonify({"reply": "Scrivi un messaggio."})
 
-            # Handle slash commands
+            # Comandi slash
             if message.startswith("/"):
                 reply = self._handle_command(message)
                 return jsonify({"reply": reply})
 
-            # Chat with DeepSeek (RAG + Supermemory enhanced)
+            # Intent routing: query fattuali → KB first, zero AI
+            msg_lower = message.lower()
+            if any(kw in msg_lower for kw in _FACTUAL_KW):
+                kb_answer = self._kb.lookup_fact(message)
+                if kb_answer:
+                    return jsonify({
+                        "reply": kb_answer,
+                        "source": "kb",
+                        "note": "Risposta dalla Knowledge Base aziendale (nessuna chiamata AI)"
+                    })
+                return jsonify({
+                    "reply": (
+                        "Non ho questa informazione nella Knowledge Base.\n\n"
+                        "Aggiungila con `/teach <fatto>` oppure dalla pagina **Knowledge Base**.\n"
+                        "Esempio: `/teach Email contatti: info@faberweb.it`"
+                    ),
+                    "source": "kb_miss"
+                })
+
+            # Chat con AI: grounding blindato + HallucinationGuard
             try:
                 context = self._kb.build_context_prompt()
-                # RAG: ricerca semantica nei documenti indicizzati (ChromaDB)
                 rag_context = ""
                 try:
                     from storage.vector_store import get_vector_store
@@ -235,7 +357,6 @@ class WorkMindUI:
                 except Exception:
                     pass
 
-                # Mem0: memoria avanzata locale (DeepSeek + HuggingFace + Qdrant)
                 memory_context = ""
                 try:
                     from storage.mem0_store import get_mem0
@@ -247,27 +368,45 @@ class WorkMindUI:
                     pass
 
                 system = (
-                    f"Sei WorkMind, l'assistente operativo intelligente di {self._company.name}. "
-                    f"Rispondi in italiano in modo conciso e professionale.\n"
+                    f"Sei WorkMind, l'assistente operativo di {self._company.name} "
+                    f"(settore: {self._company.sector}). "
+                    f"Rispondi in italiano in modo conciso e professionale.\n\n"
+                    f"REGOLE FONDAMENTALI:\n"
+                    f"1. NON inventare URL, email, numeri di telefono, indirizzi.\n"
+                    f"2. Se non sai: 'Non ho questa informazione. Aggiungila con /teach.'\n"
+                    f"3. Usa SOLO fatti presenti nella Knowledge Base qui sotto.\n"
+                    f"4. Non esiste il sito workmind.dev.\n"
                 )
                 if memory_context:
                     system += f"\n{memory_context}\n"
                 if rag_context:
                     system += f"\n{rag_context}\n"
                 if context:
-                    system += f"\n{context}\n"
+                    system += f"\n--- KNOWLEDGE BASE ---\n{context}\n---\n"
 
+                # Usa RELIABLE (Haiku) per risposte al supervisore: affidabile e veloce
                 response = self._ai.complete_simple(
                     message, system_prompt=system,
-                    role=ModelRole.FAST, max_tokens=1024, temperature=0.3,
+                    role=ModelRole.RELIABLE, max_tokens=1024, temperature=0.2,
                 )
 
-                # Salva conversazione in Mem0 (background)
+                # HallucinationGuard
+                guard_issues = []
+                if context:
+                    validation = self._guard.validate(response, context, context=message)
+                    if not validation.is_valid:
+                        guard_issues = validation.issues[:3]
+                        log.warning(
+                            f"Web UI hallucination guard: {len(validation.issues)} problemi",
+                            action=LogAction.VALIDATE,
+                            extra={"issues": guard_issues},
+                        )
+
+                # Salva in Mem0 (background)
                 try:
                     from storage.mem0_store import get_mem0
                     mem = get_mem0()
                     if mem.available:
-                        import threading
                         threading.Thread(
                             target=mem.add_conversation,
                             args=(message, response),
@@ -277,7 +416,11 @@ class WorkMindUI:
                 except Exception:
                     pass
 
-                return jsonify({"reply": response})
+                result = {"reply": response, "source": "ai"}
+                if guard_issues:
+                    result["warning"] = f"Possibili imprecisioni rilevate: {'; '.join(guard_issues[:2])}"
+                return jsonify(result)
+
             except Exception as exc:
                 return jsonify({"reply": f"Errore AI: {exc}"})
 

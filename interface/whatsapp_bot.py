@@ -33,7 +33,13 @@ from ai_client.budget import get_budget
 from config.company import get_company_config
 from config.settings import DATA_DIR
 from mindwork.feedback import get_feedback
+from nlp.hallucination_guard import HallucinationGuard
 from logging_system import get_logger, LogAction, LogStatus
+
+_FACTUAL_KW = (
+    "contatt", "telefono", "email", "mail", "indirizzo", "sito",
+    "website", "url", "numero", "orari", "sede", "dove",
+)
 
 log = get_logger("interface.whatsapp")
 
@@ -60,6 +66,7 @@ class WorkMindWhatsAppBot:
         self._company = get_company_config()
         self._feedback = get_feedback()
         self._audit = get_audit()
+        self._guard = HallucinationGuard(self._ai)
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._contacts = self._load_json(_CONTACTS_FILE, {})
@@ -549,7 +556,18 @@ class WorkMindWhatsAppBot:
     # ── AI Chat ──────────────────────────────────────────────────────────
 
     def _chat(self, text: str, phone: str) -> str:
-        """Chat libera con AI (RAG + Mem0)."""
+        """Chat libera con intent routing KB-first + grounding anti-allucinazione."""
+        # 1. Query fattuale: KB first, zero AI call
+        msg_lower = text.lower()
+        if any(kw in msg_lower for kw in _FACTUAL_KW):
+            kb_answer = self._kb.lookup_fact(text)
+            if kb_answer:
+                return kb_answer
+            return (
+                "Non ho questa informazione disponibile.\n"
+                "Contatta direttamente il nostro ufficio."
+            )
+
         try:
             context = self._kb.build_context_prompt()
             rag_context = ""
@@ -568,23 +586,46 @@ class WorkMindWhatsAppBot:
             except Exception:
                 pass
 
+            # System prompt blindato: WhatsApp ha contatti clienti reali
             system = (
                 f"Sei l'assistente di {self._company.name} su WhatsApp. "
                 f"Rispondi in italiano, conciso (max 400 caratteri). "
-                f"Sei gentile e professionale. "
-                f"NON condividere dati sensibili di altri clienti.\n"
+                f"Sei gentile e professionale.\n\n"
+                f"REGOLE OBBLIGATORIE:\n"
+                f"1. NON inventare URL, email, numeri, indirizzi o informazioni di contatto.\n"
+                f"2. NON condividere dati di altri clienti.\n"
+                f"3. Se non sai: 'Non ho questa informazione. Contatta il nostro ufficio.'\n"
+                f"4. Usa SOLO i dati presenti nella Knowledge Base.\n"
+                f"5. Non esiste il sito workmind.dev.\n"
             )
             if memory_context:
                 system += f"\n{memory_context}\n"
             if rag_context:
                 system += f"\n{rag_context}\n"
             if context:
-                system += f"\n{context}\n"
+                system += f"\n--- KB ---\n{context}\n---\n"
 
+            # WhatsApp usa RELIABLE (Haiku): clienti esterni, massima affidabilita'
             response = self._ai.complete_simple(
-                text, system_prompt=system, role=ModelRole.FAST,
-                max_tokens=250, temperature=0.3,
+                text, system_prompt=system, role=ModelRole.RELIABLE,
+                max_tokens=250, temperature=0.15,
             )
+
+            # HallucinationGuard su risposte WhatsApp (contatti clienti reali)
+            if context:
+                validation = self._guard.validate(response, context, context=text)
+                if not validation.is_valid:
+                    log.warning(
+                        f"WA hallucination guard: {len(validation.issues)} problemi",
+                        action=LogAction.VALIDATE,
+                        extra={"issues": validation.issues[:2]},
+                    )
+                    # Su WhatsApp non mostriamo l'avviso al cliente: fallback sicuro
+                    return (
+                        "Posso aiutarti con informazioni generali, "
+                        "ma per dettagli specifici ti consiglio di contattare "
+                        "direttamente il nostro ufficio."
+                    )
 
             # Salva in Mem0 (background)
             try:
@@ -601,8 +642,8 @@ class WorkMindWhatsAppBot:
                 pass
 
             return response
-        except Exception as exc:
-            return f"Mi scuso, c'e' un problema tecnico. Riprova tra poco."
+        except Exception:
+            return "Mi scuso, c'e' un problema tecnico. Riprova tra poco."
 
     # ── Send Messages ────────────────────────────────────────────────────
 

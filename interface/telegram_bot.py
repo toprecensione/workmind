@@ -37,7 +37,13 @@ from storage.audit_trail import get_audit, AuditEventType
 from ai_client.budget import get_budget
 from config.company import get_company_config
 from mindwork.feedback import get_feedback
+from nlp.hallucination_guard import HallucinationGuard
 from logging_system import get_logger, LogAction, LogStatus
+
+_FACTUAL_KW = (
+    "contatt", "telefono", "email", "mail", "indirizzo", "sito",
+    "website", "url", "numero", "orari", "sede", "p.iva", "dove",
+)
 
 log = get_logger("interface.telegram")
 
@@ -53,6 +59,7 @@ class WorkMindTelegramBot:
         self._company = get_company_config()
         self._feedback = get_feedback()
         self._audit = get_audit()
+        self._guard = HallucinationGuard(self._ai)
         self._running = False
         self._offset = 0
         self._thread: Optional[threading.Thread] = None
@@ -414,13 +421,19 @@ class WorkMindTelegramBot:
             except Exception as exc:
                 return f"Errore: {exc}"
 
+        if text.startswith("/kb"):
+            arg = text[3:].strip()
+            return self._cmd_kb(arg)
+
         if text.startswith("/help"):
             return (
                 "*Comandi WorkMind*\n\n"
                 "*Generali:*\n"
                 "/status - Stato del bot\n"
-                "/budget - Spesa AI giornaliera\n"
+                "/budget - Spesa AI per modello\n"
                 "/teach <fatto> - Insegna un fatto\n"
+                "/kb list - Elenca fatti in KB\n"
+                "/kb search <q> - Cerca in KB\n"
                 "/subscribe /unsubscribe - Notifiche\n"
                 "/mute /unmute - Pausa notifiche\n\n"
                 "*Feature Requests:*\n"
@@ -433,7 +446,19 @@ class WorkMindTelegramBot:
                 "Puoi anche inviare messaggi vocali!"
             )
 
-        # Chat libera con DeepSeek (RAG + Supermemory enhanced)
+        # ── Intent routing: KB-first per query fattuali ──────────────────
+        msg_lower = text.lower()
+        if any(kw in msg_lower for kw in _FACTUAL_KW):
+            kb_answer = self._kb.lookup_fact(text)
+            if kb_answer:
+                return f"{kb_answer}\n\n_[Fonte: KB aziendale]_"
+            return (
+                "Non ho questa informazione nella Knowledge Base.\n"
+                "Aggiungila con `/teach <fatto>`\n"
+                "Esempio: `/teach Email: info@faberweb.it`"
+            )
+
+        # Chat libera con grounding anti-allucinazione
         try:
             context = self._kb.build_context_prompt()
             rag_context = ""
@@ -443,7 +468,6 @@ class WorkMindTelegramBot:
             except Exception:
                 pass
 
-            # Mem0: memoria avanzata locale
             memory_context = ""
             try:
                 from storage.mem0_store import get_mem0
@@ -456,19 +480,23 @@ class WorkMindTelegramBot:
 
             system = (
                 f"Sei WorkMind, assistente operativo di {self._company.name}. "
-                f"Rispondi in italiano, in modo conciso (max 500 caratteri). "
-                f"Stai rispondendo via Telegram.\n"
+                f"Rispondi in italiano, conciso (max 500 caratteri). Sei su Telegram.\n\n"
+                f"REGOLE FONDAMENTALI:\n"
+                f"1. NON inventare URL, email, numeri, indirizzi.\n"
+                f"2. Se non sai, rispondi: 'Non ho questa informazione. Usa /teach per aggiungerla.'\n"
+                f"3. Usa SOLO i fatti nella Knowledge Base qui sotto.\n"
+                f"4. Non esiste il sito workmind.dev.\n"
             )
             if memory_context:
                 system += f"\n{memory_context}\n"
             if rag_context:
                 system += f"\n{rag_context}\n"
             if context:
-                system += f"\n{context}\n"
+                system += f"\n--- KB AZIENDALE ---\n{context}\n---\n"
 
             response = self._ai.complete_simple(
-                text, system_prompt=system, role=ModelRole.FAST,
-                max_tokens=300, temperature=0.3,
+                text, system_prompt=system, role=ModelRole.RELIABLE,
+                max_tokens=300, temperature=0.2,
             )
 
             # Salva conversazione in Mem0 (background)
@@ -489,3 +517,66 @@ class WorkMindTelegramBot:
             return response
         except Exception as exc:
             return f"Errore: {exc}"
+
+    def _cmd_kb(self, arg: str) -> str:
+        """Gestione Knowledge Base via Telegram."""
+        parts = arg.strip().split(maxsplit=1)
+        subcmd = parts[0].lower() if parts else "list"
+        subarg = parts[1] if len(parts) > 1 else ""
+
+        if subcmd == "list":
+            facts = self._kb.get_facts()
+            procs = self._kb.get_processes()
+            gloss = self._kb.get_glossary()
+            if not facts and not procs and not gloss:
+                return (
+                    "*Knowledge Base vuota.*
+
+"
+                    "Aggiungi fatti con:
+"
+                    "
+"
+                    ""
+                )
+            lines = [f"*KB: {len(facts)} fatti, {len(procs)} processi*
+"]
+            for i, f in enumerate(facts[-15:], 1):
+                lines.append(f"{i}. {f['text'][:80]}")
+            if procs:
+                lines.append("
+*Processi:*")
+                for p in procs[:5]:
+                    lines.append(f"• {p['name']}")
+            return "
+".join(lines)
+
+        elif subcmd == "search":
+            if not subarg:
+                return "Uso: /kb search <query>"
+            result = self._kb.lookup_fact(subarg, threshold=0.15)
+            if result:
+                return f"*Trovato:*
+{result}"
+            matches = [f["text"] for f in self._kb.get_facts()
+                       if subarg.lower() in f["text"].lower()]
+            if matches:
+                return "*Risultati:*
+" + "
+".join(f"• {m[:80]}" for m in matches[:8])
+            return f"Nessun risultato per: _{subarg}_"
+
+        elif subcmd == "export":
+            ctx = self._kb.build_context_prompt()
+            return ctx[:3000] if ctx else "KB vuota."
+
+        else:
+            return (
+                "*Comandi /kb:*
+"
+                "/kb list — Elenca fatti
+"
+                "/kb search <query> — Cerca
+"
+                "/kb export — Esporta testo"
+            )
