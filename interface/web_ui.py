@@ -537,6 +537,44 @@ class WorkMindUI:
             um = get_user_manager()
             return jsonify(um.test_smtp())
 
+        # ── Plugin Management API ─────────────────────────────────────────
+        @app.route("/api/plugins")
+        @_require_admin
+        def api_plugins_list():
+            try:
+                import plugin_loader
+                return jsonify({
+                    "loaded": plugin_loader.status_all(),
+                    "available": plugin_loader.list_available(),
+                })
+            except Exception as exc:
+                return jsonify({"error": str(exc), "loaded": [], "available": []})
+
+        @app.route("/api/plugins/enable", methods=["POST"])
+        @_require_admin
+        def api_plugins_enable():
+            data = request.get_json()
+            pid = data.get("id", "")
+            ver = data.get("version", "latest")
+            try:
+                import plugin_loader
+                plugin_loader.enable_plugin(pid, ver)
+                return jsonify({"ok": True})
+            except Exception as exc:
+                return jsonify({"ok": False, "error": str(exc)})
+
+        @app.route("/api/plugins/disable", methods=["POST"])
+        @_require_admin
+        def api_plugins_disable():
+            data = request.get_json()
+            pid = data.get("id", "")
+            try:
+                import plugin_loader
+                ok = plugin_loader.disable_plugin(pid)
+                return jsonify({"ok": ok})
+            except Exception as exc:
+                return jsonify({"ok": False, "error": str(exc)})
+
         @app.route("/api/me")
         @_require_auth
         def api_me():

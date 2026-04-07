@@ -100,6 +100,17 @@ def main() -> int:
 
     mw.start()
 
+    # ── Load Plugins ──────────────────────────────────────────────────────
+    try:
+        import plugin_loader
+        plugins = plugin_loader.load_plugins()
+        plugin_loader.startup_all()
+        log.info(f"Plugin loader attivo: {[p.id for p in plugins]}",
+                 action=LogAction.STARTUP, status=LogStatus.OK)
+    except Exception as exc:
+        log.warning(f"Plugin loader non avviato: {exc}", action=LogAction.STARTUP)
+        plugins = []
+
     # ── Start report scheduler ────────────────────────────────────────────
     report_sched = None
     try:
@@ -173,6 +184,11 @@ def main() -> int:
         pass
     finally:
         log.info("Shutting down…", action=LogAction.SHUTDOWN, status=LogStatus.STOPPING)
+        try:
+            import plugin_loader
+            plugin_loader.shutdown_all()
+        except Exception:
+            pass
         mw.stop()
         if report_sched:
             report_sched.stop()

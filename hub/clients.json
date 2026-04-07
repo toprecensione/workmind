@@ -1,0 +1,21 @@
+{
+  "clients": [
+    {
+      "id": "client-bender",
+      "name": "Bender (Dev/Test)",
+      "company": "FaberWeb",
+      "hostname": "Bender",
+      "tailscale_ip": "100.116.199.50",
+      "ssh_user": "emanuele",
+      "ssh_port": 22,
+      "workmind_port": 7860,
+      "workmind_dir": "/home/emanuele/workmind",
+      "venv_python": "/home/emanuele/workmind/venv/bin/python",
+      "systemd_service": "workmind",
+      "plugins_enabled": ["feature_requests", "voice_telegram", "whatsapp", "telegram_notifications", "backup"],
+      "workmind_version": "latest",
+      "status": "active",
+      "notes": "Server di sviluppo e test"
+    }
+  ]
+}
