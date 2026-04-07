@@ -83,7 +83,35 @@ class WorkMindTelegramBot:
         self._running = True
         self._thread = threading.Thread(target=self._poll_loop, daemon=True, name="TelegramBot")
         self._thread.start()
+        self._register_commands()
         log.info("Telegram bot avviato", action=LogAction.STARTUP, status=LogStatus.OK)
+
+    def _register_commands(self) -> None:
+        """Registra i comandi WorkMind nel menu Telegram (pulsante / su mobile)."""
+        commands = [
+            {"command": "start",       "description": "Avvia WorkMind e vedi i comandi"},
+            {"command": "idea",        "description": "Proponi una nuova funzione"},
+            {"command": "status",      "description": "Stato del sistema"},
+            {"command": "budget",      "description": "Spesa AI oggi"},
+            {"command": "teach",       "description": "Insegna un fatto alla KB"},
+            {"command": "kb",          "description": "Knowledge Base (list/search/export)"},
+            {"command": "request",     "description": "Richiedi una funzionalita'"},
+            {"command": "requests",    "description": "Vedi le richieste aperte"},
+            {"command": "approve",     "description": "Approva richiesta [master]"},
+            {"command": "reject",      "description": "Rifiuta richiesta [master]"},
+            {"command": "subscribe",   "description": "Attiva notifiche automatiche"},
+            {"command": "unsubscribe", "description": "Disattiva notifiche"},
+            {"command": "help",        "description": "Tutti i comandi disponibili"},
+        ]
+        try:
+            with httpx.Client(timeout=10) as c:
+                resp = c.post(f"{_TG_API}/setMyCommands", json={"commands": commands})
+                if resp.status_code == 200 and resp.json().get("result"):
+                    log.info("Comandi Telegram registrati", action=LogAction.STARTUP, status=LogStatus.OK)
+                else:
+                    log.warning(f"setMyCommands fallito: {resp.text}", action=LogAction.STARTUP)
+        except Exception as exc:
+            log.warning(f"setMyCommands errore: {exc}", action=LogAction.STARTUP)
 
     def stop(self) -> None:
         self._running = False
