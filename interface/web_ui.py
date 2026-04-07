@@ -1212,6 +1212,21 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
 }
 .chat-send:hover { background: var(--accent-hover); }
 .chat-send:disabled { background: var(--border); cursor: not-allowed; }
+.chat-mic {
+  width: 44px; height: 44px; border-radius: 50%; border: 1px solid var(--border);
+  background: var(--card); font-size: 18px; cursor: pointer; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  transition: all 0.2s; color: var(--text2);
+}
+.chat-mic:hover { border-color: var(--accent); color: var(--accent); }
+.chat-mic.listening {
+  background: var(--red); border-color: var(--red); color: white;
+  animation: mic-pulse 1s infinite;
+}
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255,59,48,0.4); }
+  50% { box-shadow: 0 0 0 8px rgba(255,59,48,0); }
+}
 
 /* ── Settings ─────────────────────────────────────────────────── */
 .settings-section {
@@ -1451,6 +1466,7 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
         <div class="msg bot">Ciao! Sono WorkMind. Scrivimi una domanda o usa /help per i comandi.</div>
       </div>
       <div class="chat-input-row">
+        <button class="chat-mic" id="chat-mic-btn" onclick="toggleVoice()" title="Voce">&#127908;</button>
         <input class="chat-input" id="chat-input" placeholder="Scrivi un messaggio..." autocomplete="off"
                onkeydown="if(event.key==='Enter')sendChat()">
         <button class="chat-send" onclick="sendChat()" id="chat-send-btn">&#9654;</button>
@@ -2438,6 +2454,60 @@ async function rejectFeature(id) {
 loadDashboard();
 loadSettings();
 setInterval(loadDashboard, 15000);
+
+// ── Voce ─────────────────────────────────────────────────────
+(function() {
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const micBtn = document.getElementById('chat-mic-btn');
+  if (!SR) { if (micBtn) micBtn.style.display = 'none'; return; }
+
+  const rec = new SR();
+  rec.lang = 'it-IT';
+  rec.continuous = false;
+  rec.interimResults = true;
+
+  let listening = false;
+  let finalText = '';
+
+  rec.onstart = () => {
+    listening = true;
+    finalText = '';
+    micBtn.classList.add('listening');
+    micBtn.title = 'Tocca per fermare';
+    document.getElementById('chat-input').placeholder = 'Sto ascoltando...';
+  };
+
+  rec.onresult = (e) => {
+    let interim = '';
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      if (e.results[i].isFinal) finalText += e.results[i][0].transcript;
+      else interim += e.results[i][0].transcript;
+    }
+    document.getElementById('chat-input').value = finalText + interim;
+  };
+
+  rec.onend = () => {
+    listening = false;
+    micBtn.classList.remove('listening');
+    micBtn.title = 'Voce';
+    document.getElementById('chat-input').placeholder = 'Scrivi un messaggio...';
+    // Se c'è testo, invia automaticamente
+    const input = document.getElementById('chat-input');
+    if (input.value.trim()) sendChat();
+  };
+
+  rec.onerror = (e) => {
+    listening = false;
+    micBtn.classList.remove('listening');
+    if (e.error !== 'no-speech') showToast('Microfono: ' + e.error);
+    document.getElementById('chat-input').placeholder = 'Scrivi un messaggio...';
+  };
+
+  window.toggleVoice = function() {
+    if (listening) { rec.stop(); }
+    else { rec.start(); }
+  };
+})();
 
 // ── PWA: Service Worker ───────────────────────────────────────
 if ('serviceWorker' in navigator) {
