@@ -1324,7 +1324,8 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
   .hide-mobile { display: none !important; }
   body { overflow: hidden; }
   .main { overflow: hidden; }
-  .page { padding: 16px 16px 84px; }
+  /* Tutte le pagine: padding-bottom generoso per non finire sotto la bottom nav */
+  .page { padding: 16px 16px 108px; }
   .page-title { font-size: 22px; margin-bottom: 14px; }
   .cards-grid { grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
   .card { padding: 14px; }
@@ -1340,23 +1341,36 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
   .audit-table th:first-child, .audit-table td:first-child { width: 115px; }
   .page-title { padding-top: env(safe-area-inset-top, 0px); }
 
-  /* Chat: altezza esatta, input sopra la bottom nav */
+  /* ── Chat: layout speciale ── */
+  /* La pagina chat non deve scorrere: le msg scorrono dentro il container */
   #page-chat {
-    padding-bottom: 0 !important;
-    height: calc(100dvh - 56px);
-    height: calc(100vh - 56px);
+    padding: 16px 16px 0;   /* no bottom padding: gestiamo noi */
     overflow: hidden;
+    flex: 1;
+    min-height: 0;
   }
+  /* Container = tutto lo spazio dopo il titolo */
   .chat-container {
-    flex: 1; min-height: 0; max-height: none !important; overflow: hidden;
+    flex: 1;
+    min-height: 0;
+    max-height: none !important;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
   }
+  /* Messaggi: scorrono verticalmente */
   .chat-messages {
-    flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
   }
+  /* Input: resta in fondo, con padding-bottom che supera la bottom nav */
   .chat-input-row {
-    flex-shrink: 0; padding: 10px 0 14px;
-    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+    padding: 10px 0 72px;  /* 72px > 56px bottom-nav: l'input è sopra */
     background: var(--bg);
+    border-top: 1px solid var(--border);
   }
 }
 </style>
