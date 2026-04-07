@@ -101,6 +101,21 @@ class WorkMindUI:
     def _run(self) -> None:
         self._app.run(host="0.0.0.0", port=self._port, debug=False, use_reloader=False)
 
+    def _save_chat_turn(self, uid: str, user_msg: str, bot_reply: str) -> None:
+        path = DATA_DIR / f"chat_{uid}.json"
+        try:
+            turns = json.loads(path.read_text(encoding="utf-8")) if path.exists() else []
+        except Exception:
+            turns = []
+        turns.append({
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "user": user_msg,
+            "bot": bot_reply,
+        })
+        if len(turns) > 200:
+            turns = turns[-200:]
+        path.write_text(json.dumps(turns, ensure_ascii=False, indent=2), encoding="utf-8")
+
     def _register_routes(self):
         app = self._app
 
@@ -345,11 +360,35 @@ class WorkMindUI:
             return jsonify(self._budget.model_breakdown_today())
 
         # ── API: Chat ─────────────────────────────────────────────────────
+        @app.route("/api/chat/history")
+        @_require_auth
+        def api_chat_history():
+            uid = session.get("email", "anon").replace("@", "_").replace(".", "_")
+            path = DATA_DIR / f"chat_{uid}.json"
+            if not path.exists():
+                return jsonify([])
+            try:
+                return jsonify(json.loads(path.read_text(encoding="utf-8")))
+            except Exception:
+                return jsonify([])
+
+        @app.route("/api/chat/clear", methods=["POST"])
+        @_require_auth
+        def api_chat_clear():
+            uid = session.get("email", "anon").replace("@", "_").replace(".", "_")
+            path = DATA_DIR / f"chat_{uid}.json"
+            try:
+                path.write_text("[]", encoding="utf-8")
+            except Exception:
+                pass
+            return jsonify({"ok": True})
+
         @app.route("/api/chat", methods=["POST"])
         @_require_auth
         def api_chat():
             data = request.get_json()
             message = data.get("message", "").strip()
+            history_raw = data.get("history", [])   # [{role, content}, ...]
             if not message:
                 return jsonify({"reply": "Scrivi un messaggio."})
 
@@ -446,8 +485,16 @@ class WorkMindUI:
                     system += f"\n--- KNOWLEDGE BASE ---\n{context}\n---\n"
 
                 # Usa RELIABLE (Haiku) per risposte al supervisore: affidabile e veloce
-                response = self._ai.complete_simple(
-                    message, system_prompt=system,
+                # Costruisce lista messaggi con history (max 20 = 10 scambi)
+                msgs = [
+                    AIMessage(role=h["role"], content=h["content"])
+                    for h in history_raw[-20:]
+                    if h.get("role") in ("user", "assistant") and h.get("content")
+                ]
+                msgs.append(AIMessage(role="user", content=message))
+
+                response = self._ai.complete(
+                    msgs, system_prompt=system,
                     role=ModelRole.RELIABLE, max_tokens=1024, temperature=0.2,
                 )
 
@@ -474,6 +521,13 @@ class WorkMindUI:
                             kwargs={"user_id": session.get("username", "supervisor")},
                             daemon=True,
                         ).start()
+                except Exception:
+                    pass
+
+                # Salva turno su file per persistenza
+                try:
+                    uid = session.get("email", "anon").replace("@", "_").replace(".", "_")
+                    self._save_chat_turn(uid, message, response)
                 except Exception:
                     pass
 
@@ -1460,10 +1514,13 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
 
   <!-- Chat -->
   <div class="page" id="page-chat">
-    <div class="page-title">Chat</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+      <div class="page-title" style="margin-bottom:0">Chat</div>
+      <button onclick="newChat()" style="font-size:12px;padding:6px 14px;border-radius:8px;border:1px solid var(--border);background:var(--card);color:var(--text2);cursor:pointer;font-family:var(--font)">&#43; Nuova chat</button>
+    </div>
     <div class="chat-container">
       <div class="chat-messages" id="chat-messages">
-        <div class="msg bot">Ciao! Sono WorkMind. Scrivimi una domanda o usa /help per i comandi.</div>
+        <div class="msg bot" id="chat-welcome">Ciao! Sono WorkMind. Scrivimi una domanda o usa /help per i comandi.</div>
       </div>
       <div class="chat-input-row">
         <button class="chat-mic" id="chat-mic-btn" onclick="toggleVoice()" title="Voce">&#127908;</button>
@@ -1975,33 +2032,108 @@ async function loadAudit() {
 }
 
 // ── Chat ─────────────────────────────────────────────────────
+// ── Chat history ─────────────────────────────────────────────
+const HISTORY_KEY = 'wm_chat_v2';
+const MAX_HISTORY  = 40; // max messaggi da inviare all'AI (20 scambi)
+
+let chatHistory = [];  // [{role:'user'|'assistant', content:string}]
+
+function _saveChatLocal() {
+  try { localStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistory.slice(-MAX_HISTORY))); } catch(e) {}
+}
+
+function _renderHistory(turns) {
+  // turns = [{ts, user, bot}] dal server, oppure chatHistory locale
+  const el = document.getElementById('chat-messages');
+  if (!turns || !turns.length) return;
+  const welcome = document.getElementById('chat-welcome');
+  if (welcome) welcome.remove();
+  turns.forEach(t => {
+    el.innerHTML += `<div class="msg user">${escapeHtml(t.user||t.content||'')}</div>`;
+    if (t.bot || (t.role === 'assistant' && t.content))
+      el.innerHTML += `<div class="msg bot">${escapeHtml(t.bot||t.content||'')}</div>`;
+  });
+  el.scrollTop = el.scrollHeight;
+}
+
+async function initChat() {
+  // Prova prima localStorage (instant), poi server (persistente)
+  const local = localStorage.getItem(HISTORY_KEY);
+  if (local) {
+    try {
+      const parsed = JSON.parse(local);
+      if (parsed.length) {
+        chatHistory = parsed;
+        // Ricostruisce i turni visivi da chatHistory [{role,content}]
+        const turns = [];
+        for (let i = 0; i < chatHistory.length - 1; i += 2) {
+          if (chatHistory[i]?.role === 'user')
+            turns.push({user: chatHistory[i].content, bot: chatHistory[i+1]?.content || ''});
+        }
+        _renderHistory(turns);
+        return;
+      }
+    } catch(e) {}
+  }
+  // Nessun locale: carica da server
+  try {
+    const data = await fetch('/api/chat/history').then(r => r.json());
+    if (data && data.length) {
+      data.slice(-20).forEach(t => {
+        chatHistory.push({role:'user', content: t.user});
+        chatHistory.push({role:'assistant', content: t.bot});
+      });
+      _renderHistory(data.slice(-20));
+    }
+  } catch(e) {}
+}
+
+async function newChat() {
+  chatHistory = [];
+  try { localStorage.removeItem(HISTORY_KEY); } catch(e) {}
+  await fetch('/api/chat/clear', {method:'POST'});
+  const el = document.getElementById('chat-messages');
+  el.innerHTML = '<div class="msg bot" id="chat-welcome">Ciao! Sono WorkMind. Come posso aiutarti?</div>';
+}
+
 async function sendChat() {
   const input = document.getElementById('chat-input');
   const msg = input.value.trim();
   if (!msg) return;
   input.value = '';
 
-  const messages = document.getElementById('chat-messages');
-  messages.innerHTML += `<div class="msg user">${escapeHtml(msg)}</div>`;
-  messages.innerHTML += `<div class="msg bot typing" id="typing">Sto pensando...</div>`;
-  messages.scrollTop = messages.scrollHeight;
-
+  const messagesEl = document.getElementById('chat-messages');
+  const welcome = document.getElementById('chat-welcome');
+  if (welcome) welcome.remove();
+  messagesEl.innerHTML += `<div class="msg user">${escapeHtml(msg)}</div>`;
+  messagesEl.innerHTML += `<div class="msg bot typing" id="typing">Sto pensando...</div>`;
+  messagesEl.scrollTop = messagesEl.scrollHeight;
   document.getElementById('chat-send-btn').disabled = true;
 
   try {
     const resp = await fetch('/api/chat', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({message: msg})
+      body: JSON.stringify({message: msg, history: chatHistory.slice(-MAX_HISTORY)})
     });
     const data = await resp.json();
     document.getElementById('typing').remove();
-    messages.innerHTML += `<div class="msg bot">${escapeHtml(data.reply||'...')}</div>`;
+    const reply = data.reply || '...';
+    let html = `<div class="msg bot">${escapeHtml(reply)}`;
+    if (data.warning) html += `<div style="font-size:11px;color:var(--orange);margin-top:6px">&#9888; ${escapeHtml(data.warning)}</div>`;
+    html += '</div>';
+    messagesEl.innerHTML += html;
+    // Aggiunge alla history solo scambi AI (non advisor/kb)
+    if (!data.source || data.source === 'ai') {
+      chatHistory.push({role:'user', content: msg});
+      chatHistory.push({role:'assistant', content: reply});
+      _saveChatLocal();
+    }
   } catch(err) {
     document.getElementById('typing').remove();
-    messages.innerHTML += `<div class="msg bot">Errore di connessione.</div>`;
+    messagesEl.innerHTML += `<div class="msg bot">Errore di connessione.</div>`;
   }
   document.getElementById('chat-send-btn').disabled = false;
-  messages.scrollTop = messages.scrollHeight;
+  messagesEl.scrollTop = messagesEl.scrollHeight;
 }
 
 function escapeHtml(s) {
@@ -2453,6 +2585,7 @@ async function rejectFeature(id) {
 })();
 loadDashboard();
 loadSettings();
+initChat();
 setInterval(loadDashboard, 15000);
 
 // ── Voce ─────────────────────────────────────────────────────
