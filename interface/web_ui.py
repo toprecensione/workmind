@@ -99,7 +99,8 @@ class WorkMindUI:
         log.info(f"Web UI avviata su porta {self._port}", action=LogAction.STARTUP, status=LogStatus.OK)
 
     def _run(self) -> None:
-        self._app.run(host="0.0.0.0", port=self._port, debug=False, use_reloader=False)
+        # Ascolta solo su localhost: accessibile solo tramite Nginx (VPN Tailscale)
+        self._app.run(host="127.0.0.1", port=self._port, debug=False, use_reloader=False)
 
     def _save_chat_turn(self, uid: str, user_msg: str, bot_reply: str) -> None:
         path = DATA_DIR / f"chat_{uid}.json"
