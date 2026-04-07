@@ -21,7 +21,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Optional
 
-from flask import Flask, jsonify, redirect, request, render_template_string, session, url_for
+from flask import Flask, jsonify, redirect, request, render_template_string, send_from_directory, session, url_for
 
 from config.settings import config, DATA_DIR
 from config.company import get_company_config, load_company_config, CompanyConfig
@@ -34,6 +34,8 @@ from mindwork.feedback import get_feedback
 from nlp.hallucination_guard import HallucinationGuard
 from mindwork.request_advisor import get_advisor
 from logging_system import get_logger, LogAction, LogStatus
+
+_STATIC_DIR = Path(__file__).parent.parent / "static"
 
 _FACTUAL_KW = (
     "contatt", "telefono", "email", "mail", "indirizzo", "sito",
@@ -180,6 +182,32 @@ class WorkMindUI:
         def logout():
             session.clear()
             return redirect("/login")
+
+        @app.route("/manifest.json")
+        def pwa_manifest():
+            return send_from_directory(_STATIC_DIR, "manifest.json",
+                                       mimetype="application/manifest+json")
+
+        @app.route("/sw.js")
+        def pwa_sw():
+            resp = send_from_directory(_STATIC_DIR, "sw.js",
+                                       mimetype="application/javascript")
+            resp.headers["Service-Worker-Allowed"] = "/"
+            resp.headers["Cache-Control"] = "no-cache"
+            return resp
+
+        @app.route("/favicon.ico")
+        def pwa_favicon():
+            icons_dir = _STATIC_DIR / "icons"
+            if (icons_dir / "favicon-32.png").exists():
+                return send_from_directory(icons_dir, "favicon-32.png",
+                                           mimetype="image/png")
+            return send_from_directory(icons_dir, "icon.svg",
+                                       mimetype="image/svg+xml")
+
+        @app.route("/static/icons/<path:filename>")
+        def pwa_icons(filename):
+            return send_from_directory(_STATIC_DIR / "icons", filename)
 
         @app.route("/")
         @_require_auth
@@ -1054,8 +1082,19 @@ _HTML_TEMPLATE = r"""
 <html lang="it">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>WorkMind — {{ company }}</title>
+<!-- PWA -->
+<link rel="manifest" href="/manifest.json">
+<meta name="theme-color" content="#0071e3">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="WorkMind">
+<link rel="apple-touch-icon" href="/static/icons/apple-touch-icon.png">
+<link rel="apple-touch-icon" sizes="192x192" href="/static/icons/icon-192.png">
+<link rel="icon" type="image/svg+xml" href="/static/icons/icon.svg">
+<link rel="icon" type="image/png" sizes="192x192" href="/static/icons/icon-192.png">
 <style>
 :root {
   --bg: #f5f5f7;
@@ -1253,6 +1292,54 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
 .badge-blue { background: rgba(0,113,227,0.1); color: var(--accent); }
 .badge-green { background: rgba(52,199,89,0.1); color: var(--green); }
 .badge-orange { background: rgba(255,149,0,0.1); color: var(--orange); }
+
+/* ── Bottom Nav (mobile) ───────────────────────────────────── */
+.bottom-nav {
+  display: none;
+  position: fixed; bottom: 0; left: 0; right: 0;
+  background: rgba(250,250,250,0.93);
+  backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+  border-top: 1px solid var(--border);
+  z-index: 200;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.bottom-nav-inner {
+  display: flex; justify-content: space-around; align-items: center;
+  height: 56px; padding: 0 4px;
+}
+.bottom-nav-item {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 2px; padding: 6px 8px; border-radius: 10px;
+  cursor: pointer; transition: color 0.15s ease; flex: 1;
+  color: var(--text2); font-size: 10px; font-weight: 500; max-width: 72px;
+  -webkit-tap-highlight-color: transparent;
+}
+.bottom-nav-item.active { color: var(--accent); }
+.bottom-nav-item .bn-icon { font-size: 21px; line-height: 1; }
+
+/* ── Responsive mobile ─────────────────────────────────────── */
+@media (max-width: 768px) {
+  .sidebar { display: none !important; }
+  .bottom-nav { display: block; }
+  body { overflow: hidden; }
+  .main { overflow: hidden; }
+  .page { padding: 16px 16px 72px; }
+  .page-title { font-size: 22px; margin-bottom: 14px; }
+  .cards-grid { grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 16px; }
+  .card { padding: 14px; }
+  .card-value { font-size: 24px; }
+  .card-sub { font-size: 12px; }
+  .chat-container { max-height: calc(100vh - 124px); }
+  .chat-messages { gap: 8px; }
+  .msg { max-width: 90%; font-size: 14px; }
+  .chat-input-row { padding: 10px 0; }
+  .settings-section { padding: 16px; margin-bottom: 12px; }
+  .form-row { grid-template-columns: 1fr; }
+  .form-group.full { grid-column: span 1; }
+  .audit-table { font-size: 11px; }
+  .audit-table th, .audit-table td { padding: 6px 8px; }
+  .page-title { padding-top: env(safe-area-inset-top, 0px); }
+}
 </style>
 </head>
 <body>
@@ -1733,15 +1820,45 @@ body { font-family: var(--font); background: var(--bg); color: var(--text); heig
 
 <div class="toast" id="toast"></div>
 
+<!-- Bottom Nav — visibile solo su mobile -->
+<nav class="bottom-nav" id="bottom-nav">
+  <div class="bottom-nav-inner">
+    <div class="bottom-nav-item active" id="bn-dashboard" onclick="showPage('dashboard')">
+      <span class="bn-icon">&#9673;</span>
+      <span>Home</span>
+    </div>
+    <div class="bottom-nav-item" id="bn-chat" onclick="showPage('chat')">
+      <span class="bn-icon">&#128172;</span>
+      <span>Chat</span>
+    </div>
+    <div class="bottom-nav-item" id="bn-features" onclick="showPage('features')">
+      <span class="bn-icon">&#128161;</span>
+      <span>Idee</span>
+    </div>
+    <div class="bottom-nav-item" id="bn-audit" onclick="showPage('audit')">
+      <span class="bn-icon">&#9776;</span>
+      <span>Log</span>
+    </div>
+    <div class="bottom-nav-item admin-only" id="bn-settings" onclick="showPage('settings')">
+      <span class="bn-icon">&#9881;</span>
+      <span>Config</span>
+    </div>
+  </div>
+</nav>
+
 <script>
 // ── Navigation ───────────────────────────────────────────────
 function showPage(name) {
   document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
   document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
   document.getElementById('page-' + name).classList.add('active');
-  document.querySelectorAll('.nav-item')[
-    {dashboard:0, chat:1, audit:2, features:3, whatsapp:4, users:5, settings:6}[name]
-  ].classList.add('active');
+  const idx = {dashboard:0, chat:1, audit:2, features:3, whatsapp:4, users:5, settings:6}[name];
+  const navItems = document.querySelectorAll('.nav-item');
+  if (idx !== undefined && navItems[idx]) navItems[idx].classList.add('active');
+  // Sync bottom nav
+  document.querySelectorAll('.bottom-nav-item').forEach(el => el.classList.remove('active'));
+  const bn = document.getElementById('bn-' + name);
+  if (bn) bn.classList.add('active');
   if (name === 'audit') loadAudit();
   if (name === 'features') loadFeatures();
   if (name === 'whatsapp') loadWhatsApp();
@@ -2290,6 +2407,14 @@ async function rejectFeature(id) {
 loadDashboard();
 loadSettings();
 setInterval(loadDashboard, 15000);
+
+// ── PWA: Service Worker ───────────────────────────────────────
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js')
+      .catch(err => console.log('SW:', err));
+  });
+}
 </script>
 </body>
 </html>
