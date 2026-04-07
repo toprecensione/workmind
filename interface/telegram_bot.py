@@ -558,40 +558,30 @@ class WorkMindTelegramBot:
             gloss = self._kb.get_glossary()
             if not facts and not procs and not gloss:
                 return (
-                    "*Knowledge Base vuota.*
-
-"
-                    "Aggiungi fatti con:
-"
-                    "
-"
-                    ""
+                    "*Knowledge Base vuota.*\n\n"
+                    "Aggiungi fatti con:\n"
+                    "/teach Email: info@tuaazienda.it\n"
+                    "/teach Sito: https://tuaazienda.it"
                 )
-            lines = [f"*KB: {len(facts)} fatti, {len(procs)} processi*
-"]
+            lines = [f"*KB: {len(facts)} fatti, {len(procs)} processi*\n"]
             for i, f in enumerate(facts[-15:], 1):
                 lines.append(f"{i}. {f['text'][:80]}")
             if procs:
-                lines.append("
-*Processi:*")
+                lines.append("\n*Processi:*")
                 for p in procs[:5]:
-                    lines.append(f"• {p['name']}")
-            return "
-".join(lines)
+                    lines.append(f"\u2022 {p['name']}")
+            return "\n".join(lines)
 
         elif subcmd == "search":
             if not subarg:
                 return "Uso: /kb search <query>"
             result = self._kb.lookup_fact(subarg, threshold=0.15)
             if result:
-                return f"*Trovato:*
-{result}"
+                return f"*Trovato:*\n{result}"
             matches = [f["text"] for f in self._kb.get_facts()
                        if subarg.lower() in f["text"].lower()]
             if matches:
-                return "*Risultati:*
-" + "
-".join(f"• {m[:80]}" for m in matches[:8])
+                return "*Risultati:*\n" + "\n".join(f"\u2022 {m[:80]}" for m in matches[:8])
             return f"Nessun risultato per: _{subarg}_"
 
         elif subcmd == "export":
@@ -600,11 +590,10 @@ class WorkMindTelegramBot:
 
         else:
             return (
-                "*Comandi /kb:*
-"
-                "/kb list — Elenca fatti
-"
-                "/kb search <query> — Cerca
-"
-                "/kb export — Esporta testo"
+                "*Comandi /kb:*\n"
+                "/kb list \u2014 Elenca fatti\n"
+                "/kb search <query> \u2014 Cerca\n"
+                "/kb export \u2014 Esporta testo"
             )
+
+
