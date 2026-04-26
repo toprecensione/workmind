@@ -1,0 +1,49 @@
+# WorkMind — Docker Compose Override (Development)
+# This file is automatically merged by `docker compose up` in dev.
+# In production on Bender, use only docker-compose.yml.
+#
+# Usage: docker compose up   (picks up both files automatically)
+
+version: "3.9"
+
+services:
+
+  workmind-api:
+    build:
+      target: development     # Use hot-reload dev stage
+    ports:
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:5678:5678"  # debugpy port for VS Code attach
+    environment:
+      WORKMIND_ENV: development
+      LOG_FORMAT: text
+    volumes:
+      - ./workmind-api/app:/app/app   # hot-reload source mount
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  workmind-worker:
+    environment:
+      WORKMIND_ENV: development
+      LOG_FORMAT: text
+    command: celery -A app.main worker --loglevel=debug --queues=default,indexing,scheduled --concurrency=2
+
+  # In dev: expose postgres and redis on localhost for direct access
+  postgres:
+    ports:
+      - "127.0.0.1:5432:5432"
+
+  redis:
+    ports:
+      - "127.0.0.1:6379:6379"
+
+  # In dev: expose flower directly without Nginx
+  flower:
+    ports:
+      - "127.0.0.1:5555:5555"
+
+  # In dev: expose langflow directly for flow editing
+  langflow:
+    ports:
+      - "127.0.0.1:7860:7860"
+    environment:
+      LANGFLOW_AUTO_LOGIN: "true"   # allow login without password in dev

@@ -1,0 +1,23 @@
+[Unit]
+Description=WorkMind Celery Beat Scheduler
+After=network.target redis.service
+Wants=redis.service
+
+[Service]
+Type=simple
+User=emanuele
+Group=emanuele
+WorkingDirectory=/home/emanuele/workmind-v2/workmind-api
+EnvironmentFile=/home/emanuele/workmind-v2/.env
+ExecStart=/home/emanuele/workmind-v2/.venv/bin/celery \
+    -A app.tasks.celery_app beat \
+    --loglevel=info \
+    --schedule=/home/emanuele/workmind-v2/data/celerybeat-schedule
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=workmind-celery-beat
+
+[Install]
+WantedBy=multi-user.target

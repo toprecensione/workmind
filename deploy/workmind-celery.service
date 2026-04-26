@@ -1,0 +1,31 @@
+[Unit]
+Description=WorkMind Celery Worker
+After=network.target redis.service postgresql.service
+Wants=redis.service postgresql.service
+
+[Service]
+Type=forking
+User=emanuele
+Group=emanuele
+WorkingDirectory=/home/emanuele/workmind-v2/workmind-api
+EnvironmentFile=/home/emanuele/workmind-v2/.env
+ExecStart=/home/emanuele/workmind-v2/.venv/bin/celery \
+    -A app.tasks.celery_app worker \
+    --loglevel=info \
+    --concurrency=2 \
+    --pidfile=/tmp/workmind-celery.pid \
+    --logfile=/home/emanuele/workmind-v2/logs/celery-worker.log \
+    --detach
+ExecStop=/home/emanuele/workmind-v2/.venv/bin/celery \
+    -A app.tasks.celery_app control shutdown
+ExecReload=/home/emanuele/workmind-v2/.venv/bin/celery \
+    -A app.tasks.celery_app control pool_restart
+KillSignal=SIGTERM
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=workmind-celery
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,225 @@
+version: "3.9"
+
+# WorkMind Platform — Docker Compose
+# CONFIDENTIAL - NOT FOR PUBLIC DISTRIBUTION
+# All services run on internal network. Only Nginx binds externally.
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+x-restart: &default-restart
+  restart: unless-stopped
+
+x-common-env: &common-env
+  env_file: .env
+  logging: *default-logging
+
+networks:
+  workmind-net:
+    driver: bridge
+    internal: false   # api needs outbound for AI provider calls
+  workmind-internal:
+    driver: bridge
+    internal: true    # postgres + redis: truly internal
+
+volumes:
+  pg_data:
+  redis_data:
+  langflow_data:
+  flower_data:
+  frontend_static:
+
+services:
+
+  # ── PostgreSQL 16 + pgvector ──────────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: workmind-postgres
+    <<: *default-restart
+    <<: *common-env
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-workmind}
+      POSTGRES_USER: ${POSTGRES_USER:-workmind}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?required}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - workmind-internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-workmind} -d ${POSTGRES_DB:-workmind}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
+
+  # ── Redis ─────────────────────────────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: workmind-redis
+    <<: *default-restart
+    command: redis-server --requirepass ${REDIS_PASSWORD:?required} --maxmemory 512mb --maxmemory-policy allkeys-lru --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - workmind-internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    logging: *default-logging
+
+  # ── FastAPI Core API ──────────────────────────────────────────────────────
+  workmind-api:
+    build:
+      context: ./workmind-api
+      dockerfile: Dockerfile
+      target: production
+    container_name: workmind-api
+    <<: *default-restart
+    <<: *common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"   # Nginx proxies to this; never expose publicly
+    networks:
+      - workmind-net
+      - workmind-internal
+    volumes:
+      - ./data:/app/data:ro          # legacy data for Phase 0/1 migration reads
+      - ./workmind-api/app:/app/app  # hot-reload in dev (overridden in prod)
+    environment:
+      WORKMIND_ENV: ${WORKMIND_ENV:-production}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *default-logging
+
+  # ── Celery Worker ─────────────────────────────────────────────────────────
+  workmind-worker:
+    build:
+      context: ./workmind-worker
+      dockerfile: Dockerfile
+    container_name: workmind-worker
+    <<: *default-restart
+    <<: *common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - workmind-net
+      - workmind-internal
+    volumes:
+      - ./data:/app/data
+    environment:
+      WORKMIND_ENV: ${WORKMIND_ENV:-production}
+    command: celery -A app.main worker --loglevel=info --queues=default,indexing,scheduled --concurrency=4
+    healthcheck:
+      test: ["CMD", "celery", "-A", "app.main", "inspect", "ping", "-d", "celery@${HOSTNAME}"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    logging: *default-logging
+
+  # ── Celery Beat (scheduler) ───────────────────────────────────────────────
+  workmind-beat:
+    build:
+      context: ./workmind-worker
+      dockerfile: Dockerfile
+    container_name: workmind-beat
+    <<: *default-restart
+    <<: *common-env
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - workmind-internal
+    volumes:
+      - ./data:/app/data
+    command: celery -A app.main beat --loglevel=info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    logging: *default-logging
+
+  # ── Flower (Celery monitoring) ────────────────────────────────────────────
+  flower:
+    build:
+      context: ./workmind-worker
+      dockerfile: Dockerfile
+    container_name: workmind-flower
+    <<: *default-restart
+    <<: *common-env
+    depends_on:
+      - redis
+    ports:
+      - "127.0.0.1:5555:5555"    # Nginx proxies /flower/ here (admin only)
+    networks:
+      - workmind-internal
+    command: celery -A app.main flower --port=5555 --url-prefix=flower --basic-auth=${FLOWER_USER:-admin}:${FLOWER_PASSWORD:?required}
+    logging: *default-logging
+
+  # ── Langflow (headless runtime only) ──────────────────────────────────────
+  langflow:
+    image: langflowai/langflow:1.1.1
+    container_name: workmind-langflow
+    <<: *default-restart
+    <<: *common-env
+    depends_on:
+      - postgres
+    ports:
+      - "127.0.0.1:7860:7860"    # Internal only; NOT exposed to end-users via WorkMind UI
+    networks:
+      - workmind-internal
+    volumes:
+      - langflow_data:/app/langflow
+      - ./workmind-langflow/flows:/app/flows:ro
+    environment:
+      LANGFLOW_DATABASE_URL: ${LANGFLOW_DATABASE_URL:-postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/langflow}
+      LANGFLOW_AUTO_LOGIN: "false"
+      LANGFLOW_SECRET_KEY: ${LANGFLOW_SECRET_KEY:?required}
+      LANGFLOW_WORKERS: 2
+    logging: *default-logging
+
+  # ── SvelteKit frontend builder (init container) ──────────────────────────
+  workmind-frontend:
+    build:
+      context: ./workmind-frontend
+      dockerfile: Dockerfile
+      target: dist
+    container_name: workmind-frontend-builder
+    command: ["sh", "-c", "cp -r /dist/. /var/www/html/ && echo 'Frontend static files deployed'"]
+    volumes:
+      - frontend_static:/var/www/html
+    restart: "no"
+    logging: *default-logging
+
+  # ── Nginx (only service that binds to host network) ───────────────────────
+  nginx:
+    image: nginx:1.26-alpine
+    container_name: workmind-nginx
+    <<: *default-restart
+    ports:
+      - "443:443"
+      - "80:80"      # redirect to HTTPS only
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/sites-enabled:/etc/nginx/conf.d:ro
+      - /var/lib/tailscale/certs:/etc/nginx/certs:ro   # Tailscale certs
+      - frontend_static:/var/www/html:ro                # SvelteKit build output
+    depends_on:
+      - workmind-api
+      - workmind-frontend
+    networks:
+      - workmind-net
+    logging: *default-logging

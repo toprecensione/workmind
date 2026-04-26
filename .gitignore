@@ -1,0 +1,67 @@
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Docker
+.dockerignore
+
+# Data (never commit)
+data/
+*.db
+*.sqlite
+
+# Logs
+*.log
+logs/
+
+# Certificates (never commit)
+*.crt
+*.key
+*.pem
+
+# Alembic (keep versions but not __pycache__)
+alembic/__pycache__/
+alembic/versions/__pycache__/
+uploads/
+
+# Build artifacts
+workmind-frontend/.svelte-kit/
+workmind-frontend/build/
+
+# Backups
+backups/
+
+# Staging env
+.env.staging
+workmind-frontend/.env
+workmind-frontend/.env.*
